@@ -1,6 +1,6 @@
-# GraveDig RC Tank Controller
+# ESP RC Tank Controller
 
-GraveDig is an ESP32-based replacement control system for a tank-style RC vehicle with failed original electronics.
+ESP RC is an ESP32-based replacement control system for a tank-style RC vehicle with failed original electronics.
 
 The project uses an original-generation ESP32 with Bluetooth Classic support, a Cytron MDD3A dual brushed-motor driver, a PS5 DualSense controller, WS2811/WS2812 addressable LEDs, and an onboard Wi-Fi configuration interface.
 
@@ -598,13 +598,13 @@ The vehicle immediately becomes disarmed and cannot be rearmed until battery vol
 
 # Battery Calibration
 
-Use a multimeter to compare the actual pack voltage to the voltage displayed by GraveDig.
+Use a multimeter to compare the actual pack voltage to the voltage displayed by ESP RC.
 
 Example:
 
 ```text
 Multimeter:       8.02 V
-GraveDig reports: 7.88 V
+ESP RC reports: 7.88 V
 ```
 
 Calculate:
@@ -665,7 +665,7 @@ For PS5 DualSense support, use the Bluepad32-compatible ESP32 Arduino environmen
 
 For the first DualSense pairing:
 
-1. Power on GraveDig.
+1. Power on ESP RC.
 2. Hold the DualSense **Create** button.
 3. While holding Create, hold the **PS** button.
 4. Wait for the controller LEDs to flash rapidly.
@@ -855,15 +855,15 @@ Further vehicle-level testing is ongoing.
 
 ---
 
-# License
+License
 
-Add your preferred project license here.
+ESP RC is licensed under the GNU General Public License version 3 or later (GPL-3.0-or-later).
 
-For an open-source hardware/software project, common choices include:
+You are free to use, study, modify, and redistribute this software under the terms of the GNU GPL. If you distribute modified versions or derivative works based on this software, the corresponding source code must also be made available under the GPL.
 
-* MIT License
-* Apache License 2.0
-* GNU GPLv3
+This software is provided without warranty of any kind. See the LICENSE file for the complete license terms.
+
+Copyright © 2026 RJ Riemensnider
 
 ---
 
