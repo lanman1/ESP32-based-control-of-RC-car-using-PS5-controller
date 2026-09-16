@@ -1,6 +1,6 @@
 /*
  ======================================================================
- GRAVEDIG RC TANK CONTROLLER
+ ESP RC TANK CONTROLLER
  Firmware 0.4
 
  ESP32-WROOM-32 / ESP32-WROOM-32E
@@ -50,8 +50,8 @@
  WI-FI
  ----------------------------------------------------------------------
 
- SSID:       GraveDig
- Password:   GraveDig32
+ SSID:       ESPRC
+ Password:   ESPRC123
  Address:    http://192.168.4.1
 
  ----------------------------------------------------------------------
