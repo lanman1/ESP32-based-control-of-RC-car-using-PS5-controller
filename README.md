@@ -6,13 +6,15 @@ The project uses an original-generation ESP32 with Bluetooth Classic support, a 
 
 The current firmware revision is:
 
-**Firmware Version: 0.4**
+**Firmware Version: 0.5**
 
 ---
 
 ## Features
 
 * PS5 DualSense control over Bluetooth
+* Selectable tank and arcade drive with persistent settings
+* Proportional steering or pivot steering with configurable sensitivity
 * Independent left and right track control
 * Variable-speed brushed DC motor control
 * Cytron MDD3A dual motor driver support
@@ -169,14 +171,23 @@ All grounds must remain common.
 
 | Control            | Function                              |
 | ------------------ | ------------------------------------- |
-| Left Stick Y       | Left track forward / reverse          |
-| Right Stick Y      | Right track forward / reverse         |
+| Left Stick Y       | Tank: left track; arcade: both tracks throttle |
+| Right Stick Y      | Tank: right track forward / reverse |
+| Right Stick X      | Arcade: left / right steering |
 | OPTIONS            | Arm / disarm motors                   |
 | L1                 | Low-speed profile                     |
 | R1                 | Normal-speed profile                  |
 | OPTIONS + Triangle | Enter / exit Wi-Fi configuration mode |
 
-The vehicle cannot be armed unless both joysticks are near center.
+The vehicle cannot be armed unless all active drive axes are inside the configured deadband. After reconnecting or leaving configuration mode, release OPTIONS and Triangle before pressing OPTIONS to arm.
+
+### Drive modes
+
+Tank mode is the default: left Y controls the left track, right Y controls the right track. Arcade mode uses left Y for throttle and right X for steering. Positive/right steering produces right yaw, including while reversing.
+
+Proportional steering scales steering by throttle magnitude, so a centered throttle cannot start a pivot. Pivot steering permits opposite track directions at zero throttle. Steering sensitivity is adjustable from 0–200%; the steering input is clamped before mixing. Inline SVG diagrams in the web UI explain both layouts without internet access.
+
+The mixer normalizes both outputs after trim, preserving their ratio and staying within the lower of the selected speed profile and maximum output setting. A critical-battery limit can reduce that cap further. Limits also clamp the current ramp output immediately when reduced. Existing acceleration/deceleration and motor reversal remain available.
 
 ---
 
@@ -195,6 +206,7 @@ If the DualSense disconnects:
 * both motor commands immediately go to zero
 * the vehicle becomes disarmed
 * a controller reconnection does not automatically re-arm the vehicle
+* a one-second controller-data timeout also stops and disarms the vehicle if the radio stops delivering reports before the Bluetooth stack reports a disconnect
 
 ## Configuration Mode
 
@@ -332,8 +344,8 @@ The ESP32 hosts its own Wi-Fi network when configuration mode is enabled.
 Default network:
 
 ```text
-SSID: GraveDig
-Password: GraveDig32
+SSID: ESPRC
+Password: ESPRC123
 ```
 
 Configuration page:
@@ -357,34 +369,18 @@ Default behavior:
 3. Hold `OPTIONS + Triangle`.
 4. Continue holding for 3 seconds.
 5. The status pixel / controller light flashes yellow during the hold.
-6. The `GraveDig` Wi-Fi network starts.
+6. The `ESPRC` Wi-Fi network starts.
 7. Motors remain disabled while Wi-Fi is active.
 
 The same button combination can shut configuration mode down.
 
 ---
 
-# Wi-Fi Startup Access Window
+# Wi-Fi Access
 
-By default, Wi-Fi configuration mode can only be started during the first:
+Configuration mode can be entered at any time after boot while disarmed, with the active drive axes centered. Hold OPTIONS + Triangle for the configured duration (default 3 seconds). The former 60-second startup window has been removed, including its web field and NVS setting; an old saved window is ignored.
 
-```text
-60 seconds
-```
-
-after power-up.
-
-This reduces the chance of accidentally enabling Wi-Fi while operating the vehicle.
-
-The access window is configurable.
-
-Setting the value to:
-
-```text
-0
-```
-
-allows Wi-Fi configuration mode to be entered at any time while the vehicle is SAFE.
+Wi-Fi remains off at startup. Entry is rejected while armed or emergency-aborted. Serial output reports AP startup/failure, SSID, IP address, station count changes, inactivity shutdown, and manual shutdown. Firmware 0.5 uses SSID `ESPRC` and password `ESPRC123` in the actual AP configuration.
 
 ---
 
@@ -413,6 +409,10 @@ The current web interface provides configuration for:
 
 ## Drive
 
+* Tank / arcade mode
+* Proportional / pivot steering
+* Steering sensitivity
+* Maximum motor output
 * Low-speed limit
 * Normal-speed limit
 * Stick dead zone
@@ -447,7 +447,6 @@ Pixel 0 remains reserved for system status.
 ## Wi-Fi
 
 * Idle timeout
-* Startup access window
 * OPTIONS + Triangle hold duration
 
 ## System
@@ -465,7 +464,7 @@ Pixel 0 remains reserved for system status.
 * Restore factory defaults
 * Shut down Wi-Fi
 
-All saved settings are retained in ESP32 NVS.
+All saved settings are retained in ESP32 NVS. Form values are rendered from current settings, including selected options and checkboxes. Invalid, missing, nonnumeric, nonfinite, or out-of-range numerical values reject the entire save; critical voltage must be lower than warning voltage. Corrupt saved settings restore safe defaults with battery monitoring and critical shutdown enabled. The legacy `gravedig` namespace is retained to migrate existing settings; new settings default to tank mode, proportional steering, 100% sensitivity, and 100% maximum output.
 
 ---
 
@@ -480,7 +479,7 @@ Recommended divider:
 ```text
 Vehicle Battery +
        |
-      150K
+      100K
        |
        +---------- GPIO34
        |
@@ -498,18 +497,20 @@ GPIO34 ---- 0.1 uF ---- GND
 The divider ratio is approximately:
 
 ```text
-5.545 : 1
+4.0303 : 1
 ```
 
-This is suitable for common RC battery voltages including packs up to approximately 4S when used with the configured ESP32 ADC input.
+This firmware configuration is for **2S LiPo only**. At full charge (8.4 V), the ADC receives approximately `8.4 × 33 / 133 = 2.084 V`. GPIO34 is an ADC1 input, so battery measurement remains available during Wi-Fi configuration.
 
-Always verify the actual ADC voltage before connecting higher-voltage battery packs.
+Version 0.5 changes the firmware divider constant from 150 kΩ / 33 kΩ to **100 kΩ / 33 kΩ**. Verify the physical divider matches before enabling monitoring; a board still fitted with 150 kΩ must be changed or use matching firmware constants. No other GPIO assignments change.
 
 ---
 
 # Battery Monitoring Behavior
 
-The firmware filters battery voltage readings to reduce false alarms caused by:
+The firmware averages 12 calibrated ADC millivolt readings every 100 ms, applies the divider/calibration factor, then uses exponential filtering, hysteresis, and a configurable qualification time. Initial low/critical readings must qualify too. When monitoring is disabled, ADC-based warnings and protective actions are disabled and queued battery rumble is cancelled when the setting is saved. With critical shutdown selected, an unknown/unconnected battery reading also prevents arming.
+
+These measures reduce false alarms caused by:
 
 * motor startup current
 * hard acceleration
@@ -661,25 +662,23 @@ For PS5 DualSense support, use the Bluepad32-compatible ESP32 Arduino environmen
 
 ---
 
-# Bluetooth Pairing
+# Bluetooth Pairing and Reconnection
 
-For the first DualSense pairing:
+Bluepad32 stores Bluetooth link keys in ESP32 NVS. The v0.4 sketch already avoided clearing keys at startup; v0.5 preserves that behavior, explicitly enables connections/scanning at boot and after disconnect, and disables virtual mouse devices so the DualSense touchpad cannot occupy the gamepad slot.
 
-1. Power on ESP RC.
-2. Hold the DualSense **Create** button.
-3. While holding Create, hold the **PS** button.
-4. Wait for the controller LEDs to flash rapidly.
-5. Bluepad32 should discover and connect to the controller.
+For initial pairing, hold **Create + PS** until the DualSense flashes rapidly. On later power cycles, power the ESP32 and press **PS** to wake the previously paired controller. Bluepad32 handles reconnecting with the saved keys; the controller cannot be woken by the ESP32 while powered off. Reconnection always leaves drive disarmed and requires released buttons, neutral sticks, and a new OPTIONS press.
 
-Pairing information is retained.
+To replace a controller:
 
-Do not call:
+1. Disarm and open the Wi-Fi configuration page.
+2. Choose **Clear controller pairing** and confirm. This disconnects the current controller and clears Bluepad32 keys, without deleting vehicle settings.
+3. Turn off the old controller, then hold **Create + PS** on the replacement.
 
-```cpp
-BP32.forgetBluetoothKeys();
-```
+If the old controller is unavailable, send the exact command `PAIR RESET` followed by a newline in Serial Monitor at 115200 baud while disarmed. Pairing reset is blocked while armed.
 
-during normal startup unless intentionally clearing controller pairing data.
+Serial startup diagnostics print the Bluepad32 version and local Bluetooth address. Persistent pairing still requires that NVS is not erased during upload and that the controller's pairing has not been replaced by pairing to another host. If reconnecting still fails, capture those diagnostics and test a single explicit pairing reset. This change does not claim to repair every controller or board-specific Bluetooth failure.
+
+See the [Bluepad32 API](https://github.com/ricardoquesada/bluepad32/blob/main/src/components/bluepad32_arduino/ArduinoBluepad32.h) and [official Arduino setup documentation](https://bluepad32.readthedocs.io/en/latest/plat_arduino/).
 
 ---
 
@@ -762,7 +761,7 @@ Potential future firmware additions include:
 * firmware update support
 * physical configuration button
 * dedicated emergency-stop GPIO
-* custom GraveDig PCB
+* custom ESPRC PCB
 * current sensing
 * motor stall detection
 * temperature monitoring
@@ -795,7 +794,11 @@ The software emergency stop is not a substitute for a physical battery disconnec
 # Current Default Configuration
 
 ```text
-Firmware:                  0.4
+Firmware:                  0.5
+Drive Mode:                Tank
+Steering Mode:             Proportional
+Steering Sensitivity:      100%
+Maximum Motor Output:      100% (profile cap still applies)
 
 Low Speed:                 30%
 Normal Speed:              50%
@@ -814,10 +817,10 @@ Reverse Right Motor:       Off
 
 Pixel Brightness:          80 / 255
 
-Wi-Fi SSID:                GraveDig
-Wi-Fi Password:            GraveDig32
+Wi-Fi SSID:                ESPRC
+Wi-Fi Password:            ESPRC123
 Wi-Fi Idle Timeout:        300 sec
-Wi-Fi Startup Window:      60 sec
+Wi-Fi Access:              Anytime while disarmed
 Wi-Fi Hold Time:           3 sec
 
 Battery Monitoring:        Disabled by default
@@ -876,3 +879,23 @@ Battery systems, motors, motor drivers, wiring, and mechanical systems can produ
 
 
 
+
+## Building and validation (v0.5)
+
+Use the **ESP32 + Bluepad32** board package for the original ESP32, not a BLE-only ESP32 variant. The repository previously did not pin a board-package version. Version 0.5 was compiled and linked against board package `esp32-bluepad32:esp32@4.1.0` (bundled Arduino ESP32 core 2.0.17), using Adafruit NeoPixel 1.15.5. The existing Arduino core 3.x PWM compatibility branch is retained but was not built in this validation.
+
+The sketch is kept at its existing repository path. For Arduino IDE/CLI, copy `Code/ESP32-RC-Tank-WebUI.ino` into a folder named `ESP32-RC-Tank-WebUI`, then select **ESP32 Dev Module** under the Bluepad32 board package. CLI example, with that package and NeoPixel installed:
+
+```sh
+arduino-cli compile --fqbn esp32-bluepad32:esp32:esp32 ESP32-RC-Tank-WebUI
+```
+
+Host regression tests extract and execute the actual firmware functions with simulated I/O:
+
+```sh
+python tests/test_firmware.py --compiler g++
+# Alternatively:
+python tests/test_firmware.py --compiler /path/to/zig --zig
+```
+
+Tests cover 127,008 mixer combinations, output caps after trim/ramping, neutral/button-release arming, configuration/disconnect lockouts, battery qualification and disable behavior, invalid configuration values, populated web fields, and offline SVG diagrams. They do not replace testing Bluetooth, ADC accuracy, PWM polarity, and motor behavior on the vehicle. With tracks raised, verify both drive modes, steering direction, power-cycle reconnection, disconnect stopping, Wi-Fi entry/exit, and battery warnings before ground operation.
