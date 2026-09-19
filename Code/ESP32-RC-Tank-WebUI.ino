@@ -1,7 +1,7 @@
 /*
  ======================================================================
  ESP RC TANK CONTROLLER
- Firmware 0.4
+ Firmware 0.5
 
  ESP32-WROOM-32 / ESP32-WROOM-32E
  Cytron MDD3A
@@ -34,8 +34,9 @@
  PS5 CONTROLS
  ----------------------------------------------------------------------
 
- LEFT STICK Y    Left track
- RIGHT STICK Y   Right track
+ LEFT STICK Y    Tank: left track / Arcade: both tracks throttle
+ RIGHT STICK Y   Tank: right track
+ RIGHT STICK X   Arcade: steering
 
  OPTIONS         Arm / Disarm
 
@@ -90,7 +91,7 @@
 // VERSION
 // ======================================================================
 
-#define FIRMWARE_VERSION "0.4"
+#define FIRMWARE_VERSION "0.5"
 
 
 // ======================================================================
@@ -118,9 +119,9 @@ Adafruit_NeoPixel pixels(
 
 // Divider:
 //
-// Battery + -> 150K -> ADC -> 33K -> Ground
+// Battery + -> 100K -> ADC -> 33K -> Ground
 //
-const float BAT_R_TOP = 150000.0;
+const float BAT_R_TOP = 100000.0;
 const float BAT_R_BOTTOM = 33000.0;
 
 const float BAT_DIVIDER_RATIO =
@@ -151,10 +152,10 @@ const float BAT_DIVIDER_RATIO =
 // ======================================================================
 
 const char* AP_SSID =
-    "GraveDig";
+    "ESPRC";
 
 const char* AP_PASSWORD =
-    "GraveDig32";
+    "ESPRC123";
 
 WebServer server(80);
 
@@ -174,7 +175,11 @@ Preferences prefs;
 
 struct TankSettings {
 
-    // Drive
+    // Drive: 0 = tank, 1 = arcade; steering: 0 = proportional, 1 = pivot.
+    int driveMode;
+    int steeringMode;
+    int steeringSensitivity;
+    int maxOutputPercent;
     int lowSpeedPercent;
     int normalSpeedPercent;
 
@@ -203,8 +208,6 @@ struct TankSettings {
     // Wi-Fi
     int wifiTimeoutSeconds;
 
-    // 0 = configuration mode can be started anytime
-    int wifiAccessWindowSeconds;
 
     int wifiHoldSeconds;
 
@@ -254,7 +257,10 @@ bool emergencyAbort = false;
 // BUTTON EDGE / HOLD STATE
 // ======================================================================
 
-bool previousOptions = false;
+bool previousOptions = true;
+bool armButtonReleased = false;
+unsigned long lastControllerReport = 0;
+const unsigned long CONTROLLER_TIMEOUT_MS = 1000;
 bool previousL1 = false;
 bool previousR1 = false;
 
@@ -370,6 +376,12 @@ unsigned long lastSerialTelemetry = 0;
 
 void stopMotorsImmediate();
 void updateStatusIndicators();
+bool validSettings(const TankSettings& v);
+BatteryState determineBatteryState(float voltage);
+const char* batteryStateName(BatteryState state);
+void batteryStateChanged(BatteryState newState);
+RGBColor getStatusColor(bool forController);
+void servicePairingSerial();
 
 
 // ======================================================================
@@ -377,6 +389,10 @@ void updateStatusIndicators();
 // ======================================================================
 
 void setFactoryDefaults() {
+    settings.driveMode = 0;
+    settings.steeringMode = 0;
+    settings.steeringSensitivity = 100;
+    settings.maxOutputPercent = 100;
 
     settings.lowSpeedPercent =
         30;
@@ -416,13 +432,6 @@ void setFactoryDefaults() {
     settings.wifiTimeoutSeconds =
         300;
 
-    // Default:
-    // Wi-Fi may only be STARTED during
-    // first 60 seconds after boot.
-    //
-    // 0 = anytime.
-    settings.wifiAccessWindowSeconds =
-        60;
 
     settings.wifiHoldSeconds =
         3;
@@ -467,6 +476,33 @@ void setFactoryDefaults() {
 // ======================================================================
 // LOAD SETTINGS
 // ======================================================================
+
+bool validSettings(const TankSettings& v) {
+    return
+        v.lowSpeedPercent >= 5 && v.lowSpeedPercent <= 100 &&
+        v.normalSpeedPercent >= 5 && v.normalSpeedPercent <= 100 &&
+        v.driveMode >= 0 && v.driveMode <= 1 &&
+        v.steeringMode >= 0 && v.steeringMode <= 1 &&
+        v.steeringSensitivity >= 0 && v.steeringSensitivity <= 200 &&
+        v.maxOutputPercent >= 5 && v.maxOutputPercent <= 100 &&
+        v.stickDeadzone >= 0 && v.stickDeadzone <= 200 &&
+        v.responseCurve >= 0 && v.responseCurve <= 3 &&
+        v.accelerationMs >= 0 && v.accelerationMs <= 5000 &&
+        v.decelerationMs >= 0 && v.decelerationMs <= 5000 &&
+        v.leftTrimPercent >= 50 && v.leftTrimPercent <= 120 &&
+        v.rightTrimPercent >= 50 && v.rightTrimPercent <= 120 &&
+        v.pixelBrightness >= 1 && v.pixelBrightness <= 255 &&
+        isfinite(v.lowBatteryVoltage) && v.lowBatteryVoltage >= 6.0 && v.lowBatteryVoltage <= 8.4 &&
+        isfinite(v.criticalBatteryVoltage) && v.criticalBatteryVoltage >= 6.0 && v.criticalBatteryVoltage <= 8.3 &&
+        isfinite(v.batteryHysteresis) && v.batteryHysteresis >= 0.01 && v.batteryHysteresis <= 0.5 &&
+        isfinite(v.batteryCalibration) && v.batteryCalibration >= 0.5 && v.batteryCalibration <= 1.5 &&
+        v.batteryConfirmSeconds >= 1 && v.batteryConfirmSeconds <= 15 &&
+        v.criticalBehavior >= 0 && v.criticalBehavior <= 2 &&
+        v.criticalPowerLimitPercent >= 10 && v.criticalPowerLimitPercent <= 100 &&
+        v.wifiTimeoutSeconds >= 30 && v.wifiTimeoutSeconds <= 3600 &&
+        v.wifiHoldSeconds >= 2 && v.wifiHoldSeconds <= 10 &&
+        v.criticalBatteryVoltage < v.lowBatteryVoltage;
+}
 
 void loadSettings() {
 
@@ -552,11 +588,6 @@ void loadSettings() {
             settings.wifiTimeoutSeconds
         );
 
-    settings.wifiAccessWindowSeconds =
-        prefs.getInt(
-            "wifiWin",
-            settings.wifiAccessWindowSeconds
-        );
 
     settings.wifiHoldSeconds =
         prefs.getInt(
@@ -632,8 +663,18 @@ void loadSettings() {
         );
 
 
+    settings.driveMode = prefs.getInt("driveMode", settings.driveMode);
+    settings.steeringMode = prefs.getInt("steerMode", settings.steeringMode);
+    settings.steeringSensitivity = prefs.getInt("steerSense", settings.steeringSensitivity);
+    settings.maxOutputPercent = prefs.getInt("maxOutput", settings.maxOutputPercent);
     prefs.end();
 
+    if (!validSettings(settings)) {
+        Serial.println("Invalid saved settings: restoring safe defaults, battery protection enabled.");
+        setFactoryDefaults();
+        settings.batteryEnabled = true;
+        settings.criticalBehavior = 2;
+    }
 
     // Safety validation
 
@@ -707,12 +748,6 @@ void loadSettings() {
             3600
         );
 
-    settings.wifiAccessWindowSeconds =
-        constrain(
-            settings.wifiAccessWindowSeconds,
-            0,
-            3600
-        );
 
     settings.wifiHoldSeconds =
         constrain(
@@ -756,6 +791,10 @@ void saveSettings() {
     );
 
 
+    prefs.putInt("driveMode", settings.driveMode);
+    prefs.putInt("steerMode", settings.steeringMode);
+    prefs.putInt("steerSense", settings.steeringSensitivity);
+    prefs.putInt("maxOutput", settings.maxOutputPercent);
     prefs.putInt(
         "lowPct",
         settings.lowSpeedPercent
@@ -818,10 +857,6 @@ void saveSettings() {
         settings.wifiTimeoutSeconds
     );
 
-    prefs.putInt(
-        "wifiWin",
-        settings.wifiAccessWindowSeconds
-    );
 
     prefs.putInt(
         "wifiHold",
@@ -1169,7 +1204,7 @@ int selectedSpeedPercent() {
 int effectiveSpeedPercent() {
 
     int percent =
-        selectedSpeedPercent();
+        min(selectedSpeedPercent(), settings.maxOutputPercent);
 
 
     if (
@@ -1246,84 +1281,13 @@ float applyResponseCurve(
 // STICK -> MOTOR COMMAND
 // ======================================================================
 
-int stickToMotor(
-    int rawValue
-) {
-
-    const int stickMax =
-        512;
-
-
-    rawValue =
-        constrain(
-            rawValue,
-            -stickMax,
-            stickMax
-        );
-
-
-    int magnitude =
-        abs(rawValue);
-
-
-    if (
-        magnitude <=
-        settings.stickDeadzone
-    ) {
-        return 0;
-    }
-
-
-    float normalized =
-        (
-            float(
-                magnitude -
-                settings.stickDeadzone
-            )
-        ) /
-        (
-            float(
-                stickMax -
-                settings.stickDeadzone
-            )
-        );
-
-
-    normalized =
-        constrain(
-            normalized,
-            0.0f,
-            1.0f
-        );
-
-
-    normalized =
-        applyResponseCurve(
-            normalized
-        );
-
-
-    int maxPWM =
-        round(
-            effectiveSpeedPercent() *
-            2.55f
-        );
-
-
-    int result =
-        round(
-            normalized *
-            maxPWM
-        );
-
-
-    if (rawValue < 0) {
-        result =
-            -result;
-    }
-
-
-    return result;
+float normalizedStick(int rawValue) {
+    rawValue = constrain(rawValue, -512, 512);
+    int magnitude = abs(rawValue);
+    if (magnitude <= settings.stickDeadzone) return 0.0f;
+    float value = float(magnitude - settings.stickDeadzone) / (512 - settings.stickDeadzone);
+    value = applyResponseCurve(value);
+    return rawValue < 0 ? -value : value;
 }
 
 
@@ -1446,11 +1410,11 @@ void serviceMotorRamp() {
 
     if (
         settings.batteryEnabled &&
-        batteryState ==
-            BATTERY_CRITICAL &&
+        (batteryState == BATTERY_CRITICAL || batteryState == BATTERY_UNKNOWN) &&
         settings.criticalBehavior == 2
     ) {
         driveAllowed = false;
+        motorsArmed = false;
     }
 
 
@@ -1478,6 +1442,9 @@ void serviceMotorRamp() {
         );
 
 
+    int limit = round(effectiveSpeedPercent() * 2.55f);
+    appliedLeftMotor = constrain(appliedLeftMotor, -float(limit), float(limit));
+    appliedRightMotor = constrain(appliedRightMotor, -float(limit), float(limit));
     leftMotorCommand =
         round(
             appliedLeftMotor
@@ -1503,96 +1470,40 @@ void serviceMotorRamp() {
 // DRIVE PROCESSING
 // ======================================================================
 
+// Mix normalized inputs; positive steering means clockwise/right yaw,
+// including while reversing. Proportional mode never pivots at zero throttle.
+void mixDrive(float throttle, float second, float& left, float& right) {
+    left = throttle;
+    right = second;
+    if (settings.driveMode == 1) {
+        float steering = constrain(second * settings.steeringSensitivity / 100.0f, -1.0f, 1.0f);
+        if (settings.steeringMode == 0) steering *= fabsf(throttle);
+        left = throttle + steering;
+        right = throttle - steering;
+    }
+    left *= settings.leftTrimPercent / 100.0f;
+    right *= settings.rightTrimPercent / 100.0f;
+    float scale = fmaxf(1.0f, fmaxf(fabsf(left), fabsf(right)));
+    left /= scale;
+    right /= scale;
+    if (settings.invertLeft) left = -left;
+    if (settings.invertRight) right = -right;
+}
+
 void processDrive() {
-
-    if (
-        !controller ||
-        !controller->isConnected() ||
-        !motorsArmed ||
-        emergencyAbort ||
-        wifiConfigActive
-    ) {
-
-        requestedLeftMotor = 0;
-        requestedRightMotor = 0;
-
+    if (!controller || !controller->isConnected() || !motorsArmed ||
+        emergencyAbort || wifiConfigActive) {
+        requestedLeftMotor = requestedRightMotor = 0;
         return;
     }
-
-
-    int leftRaw =
-        -controller->axisY();
-
-    int rightRaw =
-        -controller->axisRY();
-
-
-    int left =
-        stickToMotor(
-            leftRaw
-        );
-
-    int right =
-        stickToMotor(
-            rightRaw
-        );
-
-
-    // Motor trim
-
-    left =
-        round(
-            left *
-            settings.leftTrimPercent /
-            100.0f
-        );
-
-    right =
-        round(
-            right *
-            settings.rightTrimPercent /
-            100.0f
-        );
-
-
-    left =
-        constrain(
-            left,
-            -255,
-            255
-        );
-
-    right =
-        constrain(
-            right,
-            -255,
-            255
-        );
-
-
-    // Software reversal
-
-    if (
-        settings.invertLeft
-    ) {
-        left =
-            -left;
-    }
-
-
-    if (
-        settings.invertRight
-    ) {
-        right =
-            -right;
-    }
-
-
-    requestedLeftMotor =
-        left;
-
-    requestedRightMotor =
-        right;
+    float throttle = normalizedStick(-controller->axisY());
+    float second = normalizedStick(settings.driveMode == 1 ?
+        controller->axisRX() : -controller->axisRY());
+    float left, right;
+    mixDrive(throttle, second, left, right);
+    int limit = round(effectiveSpeedPercent() * 2.55f);
+    requestedLeftMotor = constrain(int(round(left * limit)), -limit, limit);
+    requestedRightMotor = constrain(int(round(right * limit)), -limit, limit);
 }
 
 
@@ -1890,9 +1801,10 @@ void serviceBatteryMonitor() {
         batteryState =
             BATTERY_UNKNOWN;
 
-        batteryFilterInitialized =
-            false;
-
+        batteryFilterInitialized = false;
+        batteryCandidate = BATTERY_UNKNOWN;
+        batteryCandidateSince = millis();
+        batteryVoltage = batteryFilteredVoltage = 0;
         return;
     }
 
@@ -1955,9 +1867,10 @@ void serviceBatteryMonitor() {
         batteryState =
             BATTERY_UNKNOWN;
 
-        batteryFilterInitialized =
-            false;
-
+        batteryFilterInitialized = false;
+        batteryCandidate = BATTERY_UNKNOWN;
+        batteryCandidateSince = millis();
+        batteryVoltage = batteryFilteredVoltage = 0;
         return;
     }
 
@@ -1996,25 +1909,6 @@ void serviceBatteryMonitor() {
         determineBatteryState(
             batteryFilteredVoltage
         );
-
-
-    // Initialize immediately
-    if (
-        batteryState ==
-        BATTERY_UNKNOWN
-    ) {
-
-        batteryState =
-            desired;
-
-        batteryCandidate =
-            desired;
-
-        batteryCandidateSince =
-            now;
-
-        return;
-    }
 
 
     if (
@@ -2556,923 +2450,166 @@ void noteWebActivity() {
 // ======================================================================
 
 String makeWebPage() {
-
     String html;
-
-    html.reserve(12000);
-
-
-    html += R"HTML(
-<!DOCTYPE html>
-<html>
-
-<head>
-
-<meta name="viewport"
-content="width=device-width,initial-scale=1">
-
-<title>GraveDig</title>
-
-<style>
-
-body {
-    font-family: Arial, sans-serif;
-    margin: 0;
-    background: #101010;
-    color: #eeeeee;
-}
-
-.container {
-    max-width: 760px;
-    margin: auto;
-    padding: 18px;
-}
-
-.card {
-    background: #222;
-    border-radius: 10px;
-    padding: 18px;
-    margin-bottom: 16px;
-}
-
-h1 {
-    margin-bottom: 4px;
-}
-
-h2 {
-    margin-top: 0;
-    font-size: 19px;
-}
-
-label {
-    display: block;
-    margin-top: 14px;
-}
-
-input,
-select {
-    width: 100%;
-    padding: 9px;
-    margin-top: 5px;
-    box-sizing: border-box;
-    background: #333;
-    color: white;
-    border: 1px solid #555;
-    border-radius: 4px;
-}
-
-input[type=checkbox] {
-    width: auto;
-}
-
-button {
-    border: 0;
-    border-radius: 6px;
-    padding: 12px 18px;
-    margin-top: 12px;
-    font-size: 16px;
-}
-
-.save {
-    background: #238636;
-    color: white;
-}
-
-.warning {
-    background: #9a6700;
-    color: white;
-}
-
-.danger {
-    background: #b62324;
-    color: white;
-}
-
-.status {
-    font-family: monospace;
-    line-height: 1.65;
-}
-
-.small {
-    font-size: 13px;
-    opacity: .75;
-}
-
-.grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-}
-
-@media(max-width:600px) {
-    .grid {
-        grid-template-columns: 1fr;
-    }
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="container">
-
-<h1>GraveDig</h1>
-<div class="small">
-Firmware )HTML";
-
-
-    html +=
-        FIRMWARE_VERSION;
-
-
-    html += R"HTML(
-</div>
-
-
-<div class="card">
-
-<h2>Live Status</h2>
-
-<div
-class="status"
-id="status">
-Loading...
-</div>
-
-</div>
-
-
-<form method="POST"
-action="/save">
-
-
-<div class="card">
-
-<h2>Drive</h2>
-
-
-<div class="grid">
-
-<label>
-Low-speed limit (%)
-<input
-type="number"
-name="lowSpeed"
-min="5"
-max="100"
-value=")HTML";
-
-    html +=
-        String(
-            settings.lowSpeedPercent
-        );
-
-
-    html += R"HTML(">
-</label>
-
-
-<label>
-Normal-speed limit (%)
-<input
-type="number"
-name="normalSpeed"
-min="5"
-max="100"
-value=")HTML";
-
-    html +=
-        String(
-            settings.normalSpeedPercent
-        );
-
-
-    html += R"HTML(">
-</label>
-
-
-<label>
-Stick dead zone
-<input
-type="number"
-name="deadzone"
-min="0"
-max="200"
-value=")HTML";
-
-    html +=
-        String(
-            settings.stickDeadzone
-        );
-
-
-    html += R"HTML(">
-</label>
-
-
-<label>
-Response curve
-
-<select name="curve">
-
-<option value="0")HTML";
-
-    if (
-        settings.responseCurve ==
-        0
-    ) {
-        html +=
-            " selected";
-    }
-
-
-    html += R"HTML(>
-Linear
-</option>
-
-<option value="1")HTML";
-
-    if (
-        settings.responseCurve ==
-        1
-    ) {
-        html +=
-            " selected";
-    }
-
-
-    html += R"HTML(>
-Soft
-</option>
-
-<option value="2")HTML";
-
-    if (
-        settings.responseCurve ==
-        2
-    ) {
-        html +=
-            " selected";
-    }
-
-
-    html += R"HTML(>
-Medium
-</option>
-
-<option value="3")HTML";
-
-    if (
-        settings.responseCurve ==
-        3
-    ) {
-        html +=
-            " selected";
-    }
-
-
-    html += R"HTML(>
-Aggressive
-</option>
-
-</select>
-
-</label>
-
-
-<label>
-Acceleration time (ms)
-<input
-type="number"
-name="accel"
-min="0"
-max="5000"
-value=")HTML";
-
-    html +=
-        String(
-            settings.accelerationMs
-        );
-
-
-    html += R"HTML(">
-</label>
-
-
-<label>
-Deceleration time (ms)
-<input
-type="number"
-name="decel"
-min="0"
-max="5000"
-value=")HTML";
-
-    html +=
-        String(
-            settings.decelerationMs
-        );
-
-
-    html += R"HTML(">
-</label>
-
-
-<label>
-Left motor trim (%)
-<input
-type="number"
-name="trimL"
-min="50"
-max="120"
-value=")HTML";
-
-    html +=
-        String(
-            settings.leftTrimPercent
-        );
-
-
-    html += R"HTML(">
-</label>
-
-
-<label>
-Right motor trim (%)
-<input
-type="number"
-name="trimR"
-min="50"
-max="120"
-value=")HTML";
-
-    html +=
-        String(
-            settings.rightTrimPercent
-        );
-
-
-    html += R"HTML(">
-</label>
-
-</div>
-
-
-<label>
-
-<input
-type="checkbox"
-name="invertLeft")HTML";
-
-    if (
-        settings.invertLeft
-    ) {
-        html +=
-            " checked";
-    }
-
-
-    html += R"HTML(>
-
-Reverse left motor
-
-</label>
-
-
-<label>
-
-<input
-type="checkbox"
-name="invertRight")HTML";
-
-    if (
-        settings.invertRight
-    ) {
-        html +=
-            " checked";
-    }
-
-
-    html += R"HTML(>
-
-Reverse right motor
-
-</label>
-
-</div>
-
-
-<div class="card">
-
-<h2>Lighting</h2>
-
-<label>
-Master pixel brightness
-<input
-type="number"
-name="brightness"
-min="1"
-max="255"
-value=")HTML";
-
-    html +=
-        String(
-            settings.pixelBrightness
-        );
-
-
-    html += R"HTML(">
-</label>
-
-<p class="small">
-Pixel 0 is reserved for system status.
-Pixels 1 and above remain available for lighting effects.
-</p>
-
-</div>
-
-
-<div class="card">
-
-<h2>Battery Monitoring</h2>
-
-
-<label>
-
-<input
-type="checkbox"
-name="batteryEnabled")HTML";
-
-    if (
-        settings.batteryEnabled
-    ) {
-        html +=
-            " checked";
-    }
-
-
-    html += R"HTML(>
-
-Enable vehicle battery monitoring
-
-</label>
-
-
-<div class="grid">
-
-
-<label>
-Low warning voltage
-<input
-type="number"
-step="0.01"
-name="lowV"
-value=")HTML";
-
-    html +=
-        String(
-            settings.lowBatteryVoltage,
-            2
-        );
-
-
-    html += R"HTML(">
-</label>
-
-
-<label>
-Critical voltage
-<input
-type="number"
-step="0.01"
-name="criticalV"
-value=")HTML";
-
-    html +=
-        String(
-            settings.criticalBatteryVoltage,
-            2
-        );
-
-
-    html += R"HTML(">
-</label>
-
-
-<label>
-Recovery hysteresis
-<input
-type="number"
-step="0.01"
-name="hysteresis"
-value=")HTML";
-
-    html +=
-        String(
-            settings.batteryHysteresis,
-            2
-        );
-
-
-    html += R"HTML(">
-</label>
-
-
-<label>
-ADC calibration multiplier
-<input
-type="number"
-step="0.001"
-name="batteryCal"
-value=")HTML";
-
-    html +=
-        String(
-            settings.batteryCalibration,
-            3
-        );
-
-
-    html += R"HTML(">
-</label>
-
-
-<label>
-Threshold confirmation time (sec)
-<input
-type="number"
-min="1"
-max="15"
-name="batteryDelay"
-value=")HTML";
-
-    html +=
-        String(
-            settings.batteryConfirmSeconds
-        );
-
-
-    html += R"HTML(">
-</label>
-
-
-<label>
-Critical power limit (%)
-<input
-type="number"
-min="10"
-max="100"
-name="criticalLimit"
-value=")HTML";
-
-    html +=
-        String(
-            settings.criticalPowerLimitPercent
-        );
-
-
-    html += R"HTML(">
-</label>
-
-</div>
-
-
-<label>
-Critical battery action
-
-<select name="criticalBehavior">
-
-<option value="0")HTML";
-
-    if (
-        settings.criticalBehavior ==
-        0
-    ) {
-        html +=
-            " selected";
-    }
-
-
-    html += R"HTML(>
-Warn only
-</option>
-
-<option value="1")HTML";
-
-    if (
-        settings.criticalBehavior ==
-        1
-    ) {
-        html +=
-            " selected";
-    }
-
-
-    html += R"HTML(>
-Limit motor power
-</option>
-
-<option value="2")HTML";
-
-    if (
-        settings.criticalBehavior ==
-        2
-    ) {
-        html +=
-            " selected";
-    }
-
-
-    html += R"HTML(>
-Disable drive
-</option>
-
-</select>
-
-</label>
-
-
-<label>
-
-<input
-type="checkbox"
-name="batteryPixel")HTML";
-
-    if (
-        settings.batteryPixelWarning
-    ) {
-        html +=
-            " checked";
-    }
-
-
-    html += R"HTML(>
-
-Battery warning on status pixel
-
-</label>
-
-
-<label>
-
-<input
-type="checkbox"
-name="batteryLight")HTML";
-
-    if (
-        settings.batteryControllerLight
-    ) {
-        html +=
-            " checked";
-    }
-
-
-    html += R"HTML(>
-
-Battery warning on DualSense lightbar
-
-</label>
-
-
-<label>
-
-<input
-type="checkbox"
-name="batteryRumble")HTML";
-
-    if (
-        settings.batteryRumble
-    ) {
-        html +=
-            " checked";
-    }
-
-
-    html += R"HTML(>
-
-Battery warning using DualSense rumble
-
-</label>
-
-
-</div>
-
-
-<div class="card">
-
-<h2>Configuration Access</h2>
-
-
-<div class="grid">
-
-
-<label>
-Wi-Fi idle timeout (sec)
-<input
-type="number"
-name="wifiTimeout"
-min="30"
-max="3600"
-value=")HTML";
-
-    html +=
-        String(
-            settings.wifiTimeoutSeconds
-        );
-
-
-    html += R"HTML(">
-</label>
-
-
-<label>
-Wi-Fi startup access window (sec)
-<input
-type="number"
-name="wifiWindow"
-min="0"
-max="3600"
-value=")HTML";
-
-    html +=
-        String(
-            settings.wifiAccessWindowSeconds
-        );
-
-
-    html += R"HTML(">
-</label>
-
-
-<label>
-OPTIONS + Triangle hold (sec)
-<input
-type="number"
-name="wifiHold"
-min="2"
-max="10"
-value=")HTML";
-
-    html +=
-        String(
-            settings.wifiHoldSeconds
-        );
-
-
-    html += R"HTML(">
-</label>
-
-
-</div>
-
-
-<p class="small">
-
-Set startup access window to 0 to allow configuration mode
-to be entered anytime while the vehicle is SAFE.
-
-</p>
-
-</div>
-
-
-<div class="card">
-
-<button
-class="save"
-type="submit">
-Save Settings
-</button>
-
-</form>
-
-
-<form
-method="POST"
-action="/defaults">
-
-<button
-class="warning"
-type="submit">
-Restore Factory Defaults
-</button>
-
-</form>
-
-
-<form
-method="POST"
-action="/wifi-off">
-
-<button
-class="danger"
-type="submit">
-Shut Down Wi-Fi
-</button>
-
-</form>
-
-</div>
-
-
-</div>
-
-
-<script>
-
-function updateStatus() {
-
-fetch('/status')
-
-.then(
-response =>
-response.json()
-)
-
-.then(data => {
-
-let s = '';
-
-s +=
-'Controller: ' +
-data.controller +
-'<br>';
-
-s +=
-'Controller Battery: ' +
-data.controllerBattery +
-'<br>';
-
-s +=
-'Drive: ' +
-data.drive +
-'<br>';
-
-s +=
-'Speed Profile: ' +
-data.profile +
-'<br>';
-
-s +=
-'Left Motor: ' +
-data.left +
-'%<br>';
-
-s +=
-'Right Motor: ' +
-data.right +
-'%<br>';
-
-s +=
-'Vehicle Battery: ' +
-data.vehicleVoltage +
-'<br>';
-
-s +=
-'Battery State: ' +
-data.batteryState +
-'<br>';
-
-s +=
-'Wi-Fi Clients: ' +
-data.clients +
-'<br>';
-
-s +=
-'Uptime: ' +
-data.uptime +
-'<br>';
-
-document.getElementById(
-'status'
-).innerHTML = s;
-
-})
-
-.catch(
-() => {}
-);
-
-}
-
-
-updateStatus();
-
-setInterval(
-updateStatus,
-2000
-);
-
-</script>
-
-</body>
-
-</html>
-)HTML";
-
-
+    html.reserve(15000);
+    html += R"HTML(<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>ESPRC</title>
+<style>body{font-family:Arial,sans-serif;background:#101820;color:#eee;margin:0}main{max-width:780px;margin:auto;padding:20px}.card{background:#202d37;padding:20px;border-radius:12px;margin:16px 0}label{display:block;margin:14px 0}input,select,button{font:inherit;padding:9px;border-radius:5px}input:not([type=checkbox]),select{display:block;box-sizing:border-box;width:100%;margin-top:5px}button{cursor:pointer;background:#c5e88a;color:#182119;border:0}svg{width:100%;height:auto}p{line-height:1.5}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:600px){.grid{grid-template-columns:1fr}}#status{white-space:pre-line;line-height:1.6}</style>
+</head><body><main><h1>ESPRC</h1><p>Firmware )HTML";
+    html += FIRMWARE_VERSION;
+    html += R"HTML(</p><section class="card"><h2>Live status</h2><div id="status">Connecting...</div></section>
+<form method="post" action="/save"><section class="card"><h2>Drive Configuration</h2>
+<div class="grid"><div><h3>Tank drive</h3>
+<svg viewBox="0 0 300 145" role="img" aria-label="Tank drive: left stick Y controls left track; right stick Y controls right track">
+<g fill="#324958" stroke="#c5e88a" stroke-width="3"><circle cx="75" cy="62" r="35"/><circle cx="225" cy="62" r="35"/><path d="M75 16v92m-9-82 9-10 9 10m-18 72 9 10 9-10M225 16v92m-9-82 9-10 9 10m-18 72 9 10 9-10" fill="none"/></g><g fill="white" font-size="12" text-anchor="middle"><text x="75" y="126">Left Track</text><text x="225" y="126">Right Track</text><text x="75" y="141">Forward / Reverse</text><text x="225" y="141">Forward / Reverse</text></g></svg></div>
+<div><h3>Arcade drive</h3><svg viewBox="0 0 300 145" role="img" aria-label="Arcade drive: left stick Y is throttle for both tracks; right stick X steers left and right">
+<g fill="#324958" stroke="#c5e88a" stroke-width="3"><circle cx="75" cy="62" r="35"/><circle cx="225" cy="62" r="35"/><path d="M75 16v92m-9-82 9-10 9 10m-18 72 9 10 9-10M179 62h92m-82-9-10 9 10 9m72-18 10 9-10 9" fill="none"/></g><g fill="white" font-size="12" text-anchor="middle"><text x="75" y="126">Both Tracks</text><text x="75" y="141">Forward / Reverse</text><text x="225" y="126">Right Stick</text><text x="225" y="141">Left / Right Steering</text></g></svg></div></div>
+<p>Arcade: left stick Y controls throttle; right stick X controls steering. Right steering commands right yaw, including in reverse. Proportional steering requires throttle. Pivot steering permits turning in place.</p>)HTML";
+    html += "<label>Low-speed limit (%)";
+    html += "<input type=\"number\" name=\"lowSpeed\" min=\"5\" max=\"100\" step=\"1\" required value=\"";
+    html += String(settings.lowSpeedPercent);
+    html += "\"></label>";
+    html += "<label>Normal-speed limit (%)";
+    html += "<input type=\"number\" name=\"normalSpeed\" min=\"5\" max=\"100\" step=\"1\" required value=\"";
+    html += String(settings.normalSpeedPercent);
+    html += "\"></label>";
+    html += "<label>Drive mode";
+    html += "<select name=\"driveMode\">";
+    html += "<option value=\"0\"";
+    if (settings.driveMode == 0) html += " selected";
+    html += ">Tank drive</option>";
+    html += "<option value=\"1\"";
+    if (settings.driveMode == 1) html += " selected";
+    html += ">Arcade drive</option>";
+    html += "</select></label>";
+    html += "<label>Steering behavior";
+    html += "<select name=\"steeringMode\">";
+    html += "<option value=\"0\"";
+    if (settings.steeringMode == 0) html += " selected";
+    html += ">Proportional (no pivot at zero throttle)</option>";
+    html += "<option value=\"1\"";
+    if (settings.steeringMode == 1) html += " selected";
+    html += ">Pivot (turn in place)</option>";
+    html += "</select></label>";
+    html += "<label>Steering sensitivity (%)";
+    html += "<input type=\"number\" name=\"steeringSensitivity\" min=\"0\" max=\"200\" step=\"1\" required value=\"";
+    html += String(settings.steeringSensitivity);
+    html += "\"></label>";
+    html += "<label>Maximum motor output (%)";
+    html += "<input type=\"number\" name=\"maxOutput\" min=\"5\" max=\"100\" step=\"1\" required value=\"";
+    html += String(settings.maxOutputPercent);
+    html += "\"></label>";
+    html += "<label>Joystick deadband (0-512 scale)";
+    html += "<input type=\"number\" name=\"deadzone\" min=\"0\" max=\"200\" step=\"1\" required value=\"";
+    html += String(settings.stickDeadzone);
+    html += "\"></label>";
+    html += "<label>Response curve";
+    html += "<select name=\"curve\">";
+    html += "<option value=\"0\"";
+    if (settings.responseCurve == 0) html += " selected";
+    html += ">Linear</option>";
+    html += "<option value=\"1\"";
+    if (settings.responseCurve == 1) html += " selected";
+    html += ">Soft</option>";
+    html += "<option value=\"2\"";
+    if (settings.responseCurve == 2) html += " selected";
+    html += ">Medium</option>";
+    html += "<option value=\"3\"";
+    if (settings.responseCurve == 3) html += " selected";
+    html += ">Aggressive</option>";
+    html += "</select></label>";
+    html += "<label>Acceleration (ms)";
+    html += "<input type=\"number\" name=\"accel\" min=\"0\" max=\"5000\" step=\"1\" required value=\"";
+    html += String(settings.accelerationMs);
+    html += "\"></label>";
+    html += "<label>Deceleration (ms)";
+    html += "<input type=\"number\" name=\"decel\" min=\"0\" max=\"5000\" step=\"1\" required value=\"";
+    html += String(settings.decelerationMs);
+    html += "\"></label>";
+    html += "<label>Left motor trim (%)";
+    html += "<input type=\"number\" name=\"trimLeft\" min=\"50\" max=\"120\" step=\"1\" required value=\"";
+    html += String(settings.leftTrimPercent);
+    html += "\"></label>";
+    html += "<label>Right motor trim (%)";
+    html += "<input type=\"number\" name=\"trimRight\" min=\"50\" max=\"120\" step=\"1\" required value=\"";
+    html += String(settings.rightTrimPercent);
+    html += "\"></label>";
+    html += "<label><input type=\"checkbox\" name=\"invertLeft\"";
+    if (settings.invertLeft) html += " checked";
+    html += ">Reverse left motor</label>";
+    html += "<label><input type=\"checkbox\" name=\"invertRight\"";
+    if (settings.invertRight) html += " checked";
+    html += ">Reverse right motor</label>";
+    html += "<label>Pixel brightness";
+    html += "<input type=\"number\" name=\"brightness\" min=\"1\" max=\"255\" step=\"1\" required value=\"";
+    html += String(settings.pixelBrightness);
+    html += "\"></label>";
+    html += R"HTML(</section><section class="card"><h2>Battery Configuration</h2><p>Battery: 2S LiPo (8.4 V full). GPIO34: 100 kOhm from battery + to ADC, 33 kOhm from ADC to ground; optional 100 nF to ground. Monitoring is disabled until enabled below.</p>)HTML";
+    html += "<label><input type=\"checkbox\" name=\"batteryEnabled\"";
+    if (settings.batteryEnabled) html += " checked";
+    html += ">Enable voltage monitoring</label>";
+    html += "<label>Warning voltage (V)";
+    html += "<input type=\"number\" name=\"lowV\" min=\"6.0\" max=\"8.4\" step=\"0.001\" required value=\"";
+    html += String(settings.lowBatteryVoltage, 3);
+    html += "\"></label>";
+    html += "<label>Critical voltage (V)";
+    html += "<input type=\"number\" name=\"criticalV\" min=\"6.0\" max=\"8.3\" step=\"0.001\" required value=\"";
+    html += String(settings.criticalBatteryVoltage, 3);
+    html += "\"></label>";
+    html += "<label>Recovery hysteresis (V)";
+    html += "<input type=\"number\" name=\"hysteresis\" min=\"0.01\" max=\"0.5\" step=\"0.001\" required value=\"";
+    html += String(settings.batteryHysteresis, 3);
+    html += "\"></label>";
+    html += "<label>ADC calibration multiplier";
+    html += "<input type=\"number\" name=\"batteryCal\" min=\"0.5\" max=\"1.5\" step=\"0.001\" required value=\"";
+    html += String(settings.batteryCalibration, 3);
+    html += "\"></label>";
+    html += "<label>Threshold confirmation (sec)";
+    html += "<input type=\"number\" name=\"batteryDelay\" min=\"1\" max=\"15\" step=\"1\" required value=\"";
+    html += String(settings.batteryConfirmSeconds);
+    html += "\"></label>";
+    html += "<label>Critical battery action";
+    html += "<select name=\"criticalBehavior\">";
+    html += "<option value=\"0\"";
+    if (settings.criticalBehavior == 0) html += " selected";
+    html += ">Warn only</option>";
+    html += "<option value=\"1\"";
+    if (settings.criticalBehavior == 1) html += " selected";
+    html += ">Limit motor power</option>";
+    html += "<option value=\"2\"";
+    if (settings.criticalBehavior == 2) html += " selected";
+    html += ">Disable drive</option>";
+    html += "</select></label>";
+    html += "<label>Critical motor power limit (%)";
+    html += "<input type=\"number\" name=\"criticalLimit\" min=\"10\" max=\"100\" step=\"1\" required value=\"";
+    html += String(settings.criticalPowerLimitPercent);
+    html += "\"></label>";
+    html += "<label><input type=\"checkbox\" name=\"batteryPixel\"";
+    if (settings.batteryPixelWarning) html += " checked";
+    html += ">Battery warning on status pixel</label>";
+    html += "<label><input type=\"checkbox\" name=\"batteryLight\"";
+    if (settings.batteryControllerLight) html += " checked";
+    html += ">Battery warning on DualSense lightbar</label>";
+    html += "<label><input type=\"checkbox\" name=\"batteryRumble\"";
+    if (settings.batteryRumble) html += " checked";
+    html += ">Battery warning rumble</label>";
+    html += R"HTML(</section><section class="card"><h2>Wi-Fi Configuration</h2><p>Hold OPTIONS + Triangle with drive disarmed and sticks neutral at any time. Motors stay disabled throughout configuration. Release buttons and center sticks before manually rearming. Wi-Fi: ESPRC / ESPRC123. Close this page to start the inactivity timeout.</p>)HTML";
+    html += "<label>Wi-Fi inactivity timeout (sec)";
+    html += "<input type=\"number\" name=\"wifiTimeout\" min=\"30\" max=\"3600\" step=\"1\" required value=\"";
+    html += String(settings.wifiTimeoutSeconds);
+    html += "\"></label>";
+    html += "<label>OPTIONS + Triangle hold (sec)";
+    html += "<input type=\"number\" name=\"wifiHold\" min=\"2\" max=\"10\" step=\"1\" required value=\"";
+    html += String(settings.wifiHoldSeconds);
+    html += "\"></label>";
+    html += R"HTML(</section><button type="submit">Save Settings</button></form>
+<section class="card"><h2>System</h2>
+<form method="post" action="/defaults"><button>Restore Factory Defaults</button></form>
+<form method="post" action="/pair-reset" onsubmit="return confirm('Forget saved controller pairing?')"><button>Clear controller pairing</button></form>
+<p>Bluepad32 retains pairing keys across restarts. Press PS to reconnect. After clearing pairing, turn off the old controller and hold Create + PS on the replacement. Motors remain disarmed.</p>
+<form method="post" action="/wifi-off"><button>Shut Down Wi-Fi</button></form></section>
+<script>async function updateStatus(){try{const r=await fetch('/status',{cache:'no-store'});if(!r.ok)throw Error();const d=await r.json();document.getElementById('status').textContent='Controller: '+d.controller+' ('+d.controllerBattery+')\nDrive: '+d.drive+' / '+d.profile+'\nMotor output: L '+d.left+'%, R '+d.right+'%\nVehicle battery: '+d.vehicleVoltage+' / '+d.batteryState+'\nWi-Fi clients: '+d.clients+'\nUptime: '+d.uptime;}catch(e){document.getElementById('status').textContent='Connection lost. Reconnect to ESPRC Wi-Fi.';}}updateStatus();setInterval(updateStatus,2000);</script>
+</main></body></html>)HTML";
     return html;
 }
 
@@ -3661,368 +2798,164 @@ void handleStatus() {
 // WEB SAVE
 // ======================================================================
 
+bool readNumber(const char* name, double low, double high, bool integer, double& value) {
+    if (!server.hasArg(name)) return false;
+    String input = server.arg(name);
+    input.trim();
+    if (!input.length()) return false;
+    char* end = nullptr;
+    value = strtod(input.c_str(), &end);
+    return end != input.c_str() && *end == 0 && isfinite(value) &&
+        value >= low && value <= high && (!integer || floor(value) == value);
+}
+
+void resetBatteryMonitor() {
+    batteryState = batteryCandidate = BATTERY_UNKNOWN;
+    batteryFilterInitialized = false;
+    batteryVoltage = batteryFilteredVoltage = 0;
+    batteryCandidateSince = lastBatteryReminder = millis();
+    rumblePattern.active = false;
+    if (controller && controller->isConnected()) controller->playDualRumble(0, 0, 0, 0);
+    lastPixelColor = lastControllerColor = 0xFFFFFFFF;
+}
+
 void handleSave() {
-
     noteWebActivity();
-
-
-    if (
-        server.hasArg(
-            "lowSpeed"
-        )
-    ) {
-
-        settings.lowSpeedPercent =
-            constrain(
-                server.arg(
-                    "lowSpeed"
-                ).toInt(),
-                5,
-                100
-            );
+    if (!wifiConfigActive || motorsArmed) {
+        server.send(409, "text/plain", "Configuration mode required.");
+        return;
     }
-
-
-    if (
-        server.hasArg(
-            "normalSpeed"
-        )
-    ) {
-
-        settings.normalSpeedPercent =
-            constrain(
-                server.arg(
-                    "normalSpeed"
-                ).toInt(),
-                5,
-                100
-            );
+    stopMotorsImmediate();
+    TankSettings candidate = settings;
+    double value;
+    if (!readNumber("lowSpeed", 5, 100, true, value)) {
+        server.send(400, "text/plain", "Invalid lowSpeed; settings were not saved.");
+        return;
     }
-
-
-    if (
-        server.hasArg(
-            "deadzone"
-        )
-    ) {
-
-        settings.stickDeadzone =
-            constrain(
-                server.arg(
-                    "deadzone"
-                ).toInt(),
-                0,
-                200
-            );
+    candidate.lowSpeedPercent = value;
+    if (!readNumber("normalSpeed", 5, 100, true, value)) {
+        server.send(400, "text/plain", "Invalid normalSpeed; settings were not saved.");
+        return;
     }
-
-
-    if (
-        server.hasArg(
-            "curve"
-        )
-    ) {
-
-        settings.responseCurve =
-            constrain(
-                server.arg(
-                    "curve"
-                ).toInt(),
-                0,
-                3
-            );
+    candidate.normalSpeedPercent = value;
+    if (!readNumber("driveMode", 0, 1, true, value)) {
+        server.send(400, "text/plain", "Invalid driveMode; settings were not saved.");
+        return;
     }
-
-
-    if (
-        server.hasArg(
-            "accel"
-        )
-    ) {
-
-        settings.accelerationMs =
-            constrain(
-                server.arg(
-                    "accel"
-                ).toInt(),
-                0,
-                5000
-            );
+    candidate.driveMode = value;
+    if (!readNumber("steeringMode", 0, 1, true, value)) {
+        server.send(400, "text/plain", "Invalid steeringMode; settings were not saved.");
+        return;
     }
-
-
-    if (
-        server.hasArg(
-            "decel"
-        )
-    ) {
-
-        settings.decelerationMs =
-            constrain(
-                server.arg(
-                    "decel"
-                ).toInt(),
-                0,
-                5000
-            );
+    candidate.steeringMode = value;
+    if (!readNumber("steeringSensitivity", 0, 200, true, value)) {
+        server.send(400, "text/plain", "Invalid steeringSensitivity; settings were not saved.");
+        return;
     }
-
-
-    if (
-        server.hasArg(
-            "trimL"
-        )
-    ) {
-
-        settings.leftTrimPercent =
-            constrain(
-                server.arg(
-                    "trimL"
-                ).toInt(),
-                50,
-                120
-            );
+    candidate.steeringSensitivity = value;
+    if (!readNumber("maxOutput", 5, 100, true, value)) {
+        server.send(400, "text/plain", "Invalid maxOutput; settings were not saved.");
+        return;
     }
-
-
-    if (
-        server.hasArg(
-            "trimR"
-        )
-    ) {
-
-        settings.rightTrimPercent =
-            constrain(
-                server.arg(
-                    "trimR"
-                ).toInt(),
-                50,
-                120
-            );
+    candidate.maxOutputPercent = value;
+    if (!readNumber("deadzone", 0, 200, true, value)) {
+        server.send(400, "text/plain", "Invalid deadzone; settings were not saved.");
+        return;
     }
-
-
-    settings.invertLeft =
-        server.hasArg(
-            "invertLeft"
-        );
-
-    settings.invertRight =
-        server.hasArg(
-            "invertRight"
-        );
-
-
-    if (
-        server.hasArg(
-            "brightness"
-        )
-    ) {
-
-        settings.pixelBrightness =
-            constrain(
-                server.arg(
-                    "brightness"
-                ).toInt(),
-                1,
-                255
-            );
+    candidate.stickDeadzone = value;
+    if (!readNumber("curve", 0, 3, true, value)) {
+        server.send(400, "text/plain", "Invalid curve; settings were not saved.");
+        return;
     }
-
-
-    // Battery
-
-    settings.batteryEnabled =
-        server.hasArg(
-            "batteryEnabled"
-        );
-
-
-    if (
-        server.hasArg(
-            "lowV"
-        )
-    ) {
-
-        settings.lowBatteryVoltage =
-            server.arg(
-                "lowV"
-            ).toFloat();
+    candidate.responseCurve = value;
+    if (!readNumber("accel", 0, 5000, true, value)) {
+        server.send(400, "text/plain", "Invalid accel; settings were not saved.");
+        return;
     }
-
-
-    if (
-        server.hasArg(
-            "criticalV"
-        )
-    ) {
-
-        settings.criticalBatteryVoltage =
-            server.arg(
-                "criticalV"
-            ).toFloat();
+    candidate.accelerationMs = value;
+    if (!readNumber("decel", 0, 5000, true, value)) {
+        server.send(400, "text/plain", "Invalid decel; settings were not saved.");
+        return;
     }
-
-
-    if (
-        server.hasArg(
-            "hysteresis"
-        )
-    ) {
-
-        settings.batteryHysteresis =
-            server.arg(
-                "hysteresis"
-            ).toFloat();
+    candidate.decelerationMs = value;
+    if (!readNumber("trimLeft", 50, 120, true, value)) {
+        server.send(400, "text/plain", "Invalid trimLeft; settings were not saved.");
+        return;
     }
-
-
-    if (
-        server.hasArg(
-            "batteryCal"
-        )
-    ) {
-
-        settings.batteryCalibration =
-            server.arg(
-                "batteryCal"
-            ).toFloat();
+    candidate.leftTrimPercent = value;
+    if (!readNumber("trimRight", 50, 120, true, value)) {
+        server.send(400, "text/plain", "Invalid trimRight; settings were not saved.");
+        return;
     }
-
-
-    if (
-        server.hasArg(
-            "batteryDelay"
-        )
-    ) {
-
-        settings.batteryConfirmSeconds =
-            constrain(
-                server.arg(
-                    "batteryDelay"
-                ).toInt(),
-                1,
-                15
-            );
+    candidate.rightTrimPercent = value;
+    if (!readNumber("brightness", 1, 255, true, value)) {
+        server.send(400, "text/plain", "Invalid brightness; settings were not saved.");
+        return;
     }
-
-
-    settings.batteryPixelWarning =
-        server.hasArg(
-            "batteryPixel"
-        );
-
-    settings.batteryControllerLight =
-        server.hasArg(
-            "batteryLight"
-        );
-
-    settings.batteryRumble =
-        server.hasArg(
-            "batteryRumble"
-        );
-
-
-    if (
-        server.hasArg(
-            "criticalBehavior"
-        )
-    ) {
-
-        settings.criticalBehavior =
-            constrain(
-                server.arg(
-                    "criticalBehavior"
-                ).toInt(),
-                0,
-                2
-            );
+    candidate.pixelBrightness = value;
+    if (!readNumber("lowV", 6.0, 8.4, false, value)) {
+        server.send(400, "text/plain", "Invalid lowV; settings were not saved.");
+        return;
     }
-
-
-    if (
-        server.hasArg(
-            "criticalLimit"
-        )
-    ) {
-
-        settings.criticalPowerLimitPercent =
-            constrain(
-                server.arg(
-                    "criticalLimit"
-                ).toInt(),
-                10,
-                100
-            );
+    candidate.lowBatteryVoltage = value;
+    if (!readNumber("criticalV", 6.0, 8.3, false, value)) {
+        server.send(400, "text/plain", "Invalid criticalV; settings were not saved.");
+        return;
     }
-
-
-    // Wi-Fi
-
-    if (
-        server.hasArg(
-            "wifiTimeout"
-        )
-    ) {
-
-        settings.wifiTimeoutSeconds =
-            constrain(
-                server.arg(
-                    "wifiTimeout"
-                ).toInt(),
-                30,
-                3600
-            );
+    candidate.criticalBatteryVoltage = value;
+    if (!readNumber("hysteresis", 0.01, 0.5, false, value)) {
+        server.send(400, "text/plain", "Invalid hysteresis; settings were not saved.");
+        return;
     }
-
-
-    if (
-        server.hasArg(
-            "wifiWindow"
-        )
-    ) {
-
-        settings.wifiAccessWindowSeconds =
-            constrain(
-                server.arg(
-                    "wifiWindow"
-                ).toInt(),
-                0,
-                3600
-            );
+    candidate.batteryHysteresis = value;
+    if (!readNumber("batteryCal", 0.5, 1.5, false, value)) {
+        server.send(400, "text/plain", "Invalid batteryCal; settings were not saved.");
+        return;
     }
-
-
-    if (
-        server.hasArg(
-            "wifiHold"
-        )
-    ) {
-
-        settings.wifiHoldSeconds =
-            constrain(
-                server.arg(
-                    "wifiHold"
-                ).toInt(),
-                2,
-                10
-            );
+    candidate.batteryCalibration = value;
+    if (!readNumber("batteryDelay", 1, 15, true, value)) {
+        server.send(400, "text/plain", "Invalid batteryDelay; settings were not saved.");
+        return;
     }
-
-
+    candidate.batteryConfirmSeconds = value;
+    if (!readNumber("criticalBehavior", 0, 2, true, value)) {
+        server.send(400, "text/plain", "Invalid criticalBehavior; settings were not saved.");
+        return;
+    }
+    candidate.criticalBehavior = value;
+    if (!readNumber("criticalLimit", 10, 100, true, value)) {
+        server.send(400, "text/plain", "Invalid criticalLimit; settings were not saved.");
+        return;
+    }
+    candidate.criticalPowerLimitPercent = value;
+    if (!readNumber("wifiTimeout", 30, 3600, true, value)) {
+        server.send(400, "text/plain", "Invalid wifiTimeout; settings were not saved.");
+        return;
+    }
+    candidate.wifiTimeoutSeconds = value;
+    if (!readNumber("wifiHold", 2, 10, true, value)) {
+        server.send(400, "text/plain", "Invalid wifiHold; settings were not saved.");
+        return;
+    }
+    candidate.wifiHoldSeconds = value;
+    candidate.invertLeft = server.hasArg("invertLeft");
+    candidate.invertRight = server.hasArg("invertRight");
+    candidate.batteryEnabled = server.hasArg("batteryEnabled");
+    candidate.batteryPixelWarning = server.hasArg("batteryPixel");
+    candidate.batteryControllerLight = server.hasArg("batteryLight");
+    candidate.batteryRumble = server.hasArg("batteryRumble");
+    if (!validSettings(candidate)) {
+        server.send(400, "text/plain", "Critical voltage must be below warning voltage; settings were not saved.");
+        return;
+    }
+    settings = candidate;
     saveSettings();
-
-
-    server.sendHeader(
-        "Location",
-        "/"
-    );
-
-    server.send(
-        303,
-        "text/plain",
-        "Saved"
-    );
+    resetBatteryMonitor();
+    armButtonReleased = false;
+    previousOptions = true;
+    pixels.setBrightness(settings.pixelBrightness);
+    server.sendHeader("Location", "/");
+    server.send(303, "text/plain", "Saved");
 }
 
 
@@ -4031,6 +2964,12 @@ void handleSave() {
 // ======================================================================
 
 void handleDefaults() {
+    if (!wifiConfigActive || motorsArmed) {
+        server.send(409, "text/plain", "Configuration mode required.");
+        return;
+    }
+    stopMotorsImmediate();
+    resetBatteryMonitor();
 
     noteWebActivity();
 
@@ -4087,7 +3026,7 @@ color:white;
 padding:30px;
 ">
 
-<h2>GraveDig</h2>
+<h2>ESPRC</h2>
 
 <p>
 Configuration Wi-Fi is shutting down.
@@ -4116,7 +3055,40 @@ The vehicle remains SAFE.
 // WEB ROUTES
 // ======================================================================
 
+void resetControllerPairing() {
+    if (motorsArmed) return;
+    stopMotorsImmediate();
+    armButtonReleased = false;
+    previousOptions = true;
+    if (controller) controller->disconnect();
+    BP32.forgetBluetoothKeys();
+    BP32.enableNewBluetoothConnections(true);
+    Serial.println("Bluetooth keys cleared. Turn off old controller; hold Create + PS on replacement.");
+}
+
+void servicePairingSerial() {
+    static char command[32];
+    static size_t length = 0;
+    static bool overflow = false;
+    for (int i = 0; i < 32 && Serial.available(); ++i) {
+        char c = Serial.read();
+        if (c == '\r') continue;
+        if (c == '\n') {
+            command[length] = 0;
+            if (!overflow && strcmp(command, "PAIR RESET") == 0) {
+                if (motorsArmed) Serial.println("Pairing reset blocked while ARMED.");
+                else resetControllerPairing();
+            }
+            length = 0;
+            overflow = false;
+        } else if (length < sizeof(command) - 1) command[length++] = c;
+        else overflow = true;
+    }
+}
+
 void configureWebRoutes() {
+    // Handlers execute only while configuration mode locks out drive.
+
 
     static bool configured =
         false;
@@ -4127,8 +3099,16 @@ void configureWebRoutes() {
     }
 
 
-    configured =
-        true;
+    configured = true;
+    server.on("/pair-reset", HTTP_POST, []() {
+        if (!wifiConfigActive || motorsArmed) {
+            server.send(409, "text/plain", "Disarm and enter configuration mode first.");
+            return;
+        }
+        noteWebActivity();
+        resetControllerPairing();
+        server.send(200, "text/html", "<p>Pairing cleared. Turn off the old controller, then hold Create + PS on the replacement.</p><a href='/'>Back</a>");
+    });
 
 
     server.on(
@@ -4195,6 +3175,11 @@ void configureWebRoutes() {
 // ======================================================================
 
 void startConfigWiFi() {
+    if (motorsArmed || emergencyAbort) {
+        Serial.println("Wi-Fi activation blocked: vehicle must be disarmed and not aborted.");
+        return;
+    }
+    Serial.println("Starting ESPRC configuration AP...");
 
     if (
         wifiConfigActive
@@ -4287,6 +3272,8 @@ void startConfigWiFi() {
 // ======================================================================
 
 void stopConfigWiFi() {
+    armButtonReleased = false;
+    previousOptions = true;
 
     if (
         !wifiConfigActive
@@ -4348,6 +3335,12 @@ void serviceConfigWiFi() {
     }
 
 
+    static int lastClients = -1;
+    int clients = WiFi.softAPgetStationNum();
+    if (clients != lastClients) {
+        Serial.printf("Wi-Fi clients: %d (previous %d)\n", clients, lastClients);
+        lastClients = clients;
+    }
     server.handleClient();
 
 
@@ -4393,27 +3386,9 @@ void serviceConfigWiFi() {
 // ======================================================================
 
 bool sticksCentered() {
-
-    if (!controller) {
-        return false;
-    }
-
-
-    int margin =
-        settings.stickDeadzone +
-        30;
-
-
-    return
-        abs(
-            controller->axisY()
-        ) <
-        margin
-        &&
-        abs(
-            controller->axisRY()
-        ) <
-        margin;
+    if (!controller || !controller->isConnected()) return false;
+    return abs(controller->axisY()) <= settings.stickDeadzone &&
+        abs(settings.driveMode == 1 ? controller->axisRX() : controller->axisRY()) <= settings.stickDeadzone;
 }
 
 
@@ -4421,21 +3396,7 @@ bool sticksCentered() {
 // CONFIG ACCESS WINDOW
 // ======================================================================
 
-bool wifiAccessWindowOpen() {
 
-    if (
-        settings.wifiAccessWindowSeconds ==
-        0
-    ) {
-        return true;
-    }
-
-
-    return
-        millis() <=
-        settings.wifiAccessWindowSeconds *
-        1000UL;
-}
 
 
 // ======================================================================
@@ -4508,40 +3469,6 @@ void processWiFiCombo() {
     }
 
 
-    // Startup access window only affects ENTRY,
-    // never shutdown.
-
-    if (
-        !wifiConfigActive &&
-        !wifiAccessWindowOpen()
-    ) {
-
-        if (
-            !wifiComboTriggered
-        ) {
-
-            wifiComboTriggered =
-                true;
-
-            Serial.println(
-                "Wi-Fi configuration access window closed."
-            );
-
-
-            queueRumble(
-                2,
-                100,
-                80,
-                40,
-                40
-            );
-        }
-
-
-        return;
-    }
-
-
     if (
         !wifiComboActive
     ) {
@@ -4603,8 +3530,12 @@ void onConnectedController(
     }
 
 
-    controller =
-        ctl;
+    if (!ctl->isGamepad()) return;
+    controller = ctl;
+    armButtonReleased = false;
+    previousOptions = true;
+    previousL1 = previousR1 = false;
+    lastControllerReport = millis();
 
 
     motorsArmed =
@@ -4686,8 +3617,10 @@ void onDisconnectedController(
     }
 
 
-    controller =
-        nullptr;
+    controller = nullptr;
+    armButtonReleased = false;
+    previousOptions = true;
+    BP32.enableNewBluetoothConnections(true);
 
 
     motorsArmed =
@@ -4746,6 +3679,7 @@ void processButtons() {
     if (
         options &&
         !previousOptions &&
+        armButtonReleased &&
         !triangle
     ) {
 
@@ -4760,8 +3694,7 @@ void processButtons() {
 
             if (
                 settings.batteryEnabled &&
-                batteryState ==
-                    BATTERY_CRITICAL &&
+                (batteryState == BATTERY_CRITICAL || batteryState == BATTERY_UNKNOWN) &&
                 settings.criticalBehavior ==
                     2
             ) {
@@ -4817,8 +3750,8 @@ void processButtons() {
     }
 
 
-    previousOptions =
-        options;
+    if (!options && !triangle) armButtonReleased = true;
+    previousOptions = options;
 
 
     // --------------------------------------------------------------
@@ -4924,6 +3857,10 @@ void printTelemetry() {
 
 void setup() {
 
+    // Establish zero motor outputs before Serial, NVS, or Bluetooth startup.
+    setupPWM();
+    stopMotorsImmediate();
+
     Serial.begin(
         115200
     );
@@ -4940,7 +3877,7 @@ void setup() {
     );
 
     Serial.println(
-        "GraveDig RC Tank"
+        "ESPRC RC Tank"
     );
 
     Serial.print(
@@ -4982,13 +3919,6 @@ void setup() {
     pixels.show();
 
 
-    // Motors
-
-    setupPWM();
-
-    stopMotorsImmediate();
-
-
     // Battery ADC
 
     analogReadResolution(
@@ -5015,6 +3945,15 @@ void setup() {
         &onDisconnectedController
     );
 
+
+    BP32.enableNewBluetoothConnections(true);
+    BP32.enableVirtualDevice(false);
+    Serial.printf("Bluepad32: %s\n", BP32.firmwareVersion());
+    const uint8_t* bt = BP32.localBdAddress();
+    Serial.printf("Bluetooth address: %02X:%02X:%02X:%02X:%02X:%02X\n",
+        bt[0], bt[1], bt[2], bt[3], bt[4], bt[5]);
+    Serial.println("Saved Bluetooth keys retained. Press PS to reconnect; Create + PS for first pairing.");
+    Serial.println("Send PAIR RESET on Serial while disarmed to forget pairing.");
 
     // IMPORTANT:
     //
@@ -5066,13 +4005,22 @@ void loop() {
     // --------------------------------------------------------------
 
     checkAbortButton();
+    servicePairingSerial();
 
 
     // --------------------------------------------------------------
     // Bluepad32
     // --------------------------------------------------------------
 
-    BP32.update();
+    bool dataUpdated = BP32.update();
+    if (dataUpdated && controller && controller->hasData()) lastControllerReport = millis();
+    // The Bluetooth stack may take seconds to report a lost radio link.
+    if (controller && millis() - lastControllerReport > CONTROLLER_TIMEOUT_MS) {
+        motorsArmed = false;
+        stopMotorsImmediate();
+        armButtonReleased = false;
+        previousOptions = true;
+    }
 
 
     // --------------------------------------------------------------
@@ -5089,7 +4037,8 @@ void loop() {
     if (
         controller &&
         controller->isConnected() &&
-        controller->isGamepad()
+        controller->isGamepad() &&
+        millis() - lastControllerReport <= CONTROLLER_TIMEOUT_MS
     ) {
 
         processButtons();
