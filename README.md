@@ -480,7 +480,7 @@ Pixel 0 remains reserved for system status.
 * Restore factory defaults
 * Shut down Wi-Fi
 
-All saved settings are retained in ESP32 NVS. Form values are rendered from current settings, including selected options and checkboxes. Invalid, missing, nonnumeric, nonfinite, or out-of-range numerical values reject the entire save; critical voltage must be lower than warning voltage. Corrupt saved settings restore safe defaults with battery monitoring and critical shutdown enabled. Settings are stored in the `gravedig` NVS namespace, the only namespace the firmware uses; the name is kept from earlier revisions so existing saved settings still load, and no migration from any other namespace is performed. New settings default to tank mode, proportional steering, 100% sensitivity, and 100% maximum output.
+All saved settings are retained in ESP32 NVS. Form values are rendered from current settings, including selected options and checkboxes. Invalid, missing, nonnumeric, nonfinite, or out-of-range numerical values reject the entire save; critical voltage must be lower than warning voltage. Corrupt saved settings restore safe defaults with battery monitoring and critical shutdown enabled. Settings are stored in the `esprc` NVS namespace. Firmware 0.6.0 and earlier used a different namespace that is not migrated, so the first boot after updating from those versions starts from factory defaults; re-enter any customized settings. Bluetooth pairing is stored separately and is not affected. New settings default to tank mode, proportional steering, 100% sensitivity, and 100% maximum output.
 
 ---
 

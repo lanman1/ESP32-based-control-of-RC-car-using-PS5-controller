@@ -4,6 +4,9 @@ All notable changes to the ESP RC firmware are recorded here. The format follows
 
 ## [Unreleased] - target 0.7.0
 
+### Changed
+- **Settings reset on update:** the NVS settings namespace is now `esprc`. Settings saved by 0.6.0 or earlier are not migrated, so the first boot starts from factory defaults. Bluetooth pairing is unaffected.
+
 ### Planned
 - Staged / deferred Wi-Fi shutdown for controller, web, and idle-timeout exits (H3).
 - Priority safety fixes: OPTIONS-before-Triangle arming (R1), second controller stranding the vehicle (R2), critical-battery re-arm cycling (R6).
@@ -28,7 +31,7 @@ Baseline imported from the generated `ESP32-RC-Tank-WebUI-v6.ino`. Not compiled 
 
 ### Documentation
 - README updated for the 0.6.0 pin map, controller initialization, data timeout, and status colors.
-- README no longer claims the `gravedig` NVS namespace is migrated; it is simply the only namespace used.
+- README no longer claims the settings NVS namespace is migrated from a legacy one.
 - README notes that `tests/test_firmware.py` is not yet in the repository.
 
 ### Known issues
