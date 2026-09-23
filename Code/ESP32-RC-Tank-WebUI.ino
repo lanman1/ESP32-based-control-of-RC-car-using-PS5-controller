@@ -442,6 +442,10 @@ struct RGBColor {
 };
 
 
+// Web UI controller diagram variants (declared early for Arduino's
+// generated prototypes).
+enum ControllerDiagram { CTRL_MAP, CTRL_PAIR, CTRL_COMBO, CTRL_TANK, CTRL_ARCADE };
+
 uint32_t lastPixelColor =
     0xFFFFFFFF;
 
@@ -2497,45 +2501,45 @@ String makeBatteryWiringSvg() {
 }
 
 
-// H2 / U1: DualSense outline highlighting the buttons for pairing
-// (Create + PS) or configuration mode (OPTIONS + Triangle).
-String makeControllerSvg( bool pairing ) {
-    const char* on = "#c5e88a";
-    const char* off = "#324958";
+// H2 / U1 / drive modes: controller diagrams in the filled style.
+// Shared parts of the controller diagrams (generic gamepad, not a
+// product likeness). Layout matches the DualSense button positions.
+static const char CTRL_SVG_COMMON[] = R"SVG(<defs><linearGradient id="cbd" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5a6875"/><stop offset=".55" stop-color="#3b4651"/><stop offset="1" stop-color="#262e36"/></linearGradient><linearGradient id="ctp" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4a5763"/><stop offset="1" stop-color="#2f3942"/></linearGradient><radialGradient id="cbt" cx=".4" cy=".35" r=".7"><stop offset="0" stop-color="#6b7885"/><stop offset="1" stop-color="#2a323a"/></radialGradient><radialGradient id="chl" cx=".4" cy=".35" r=".7"><stop offset="0" stop-color="#f1ffd9"/><stop offset="1" stop-color="#8fbf4a"/></radialGradient><radialGradient id="cst" cx=".45" cy=".4" r=".6"><stop offset="0" stop-color="#3a444e"/><stop offset=".8" stop-color="#1b2127"/><stop offset="1" stop-color="#11161b"/></radialGradient><filter id="cgl" x="-1" y="-1" width="3" height="3"><feGaussianBlur stdDeviation="3"/></filter><filter id="csh" x="-.1" y="-.1" width="1.2" height="1.3"><feDropShadow dy="4" stdDeviation="4" flood-opacity=".5"/></filter><marker id="car" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#c5e88a"/></marker></defs><g fill="url(#cbt)" stroke="#11161b"><rect x="64" y="22" width="44" height="16" rx="6"/><rect x="252" y="22" width="44" height="16" rx="6"/></g><path filter="url(#csh)" fill="url(#cbd)" stroke="#1a2026" stroke-width="1.5" d="M78 34C110 24 250 24 282 34C318 44 334 80 340 124C346 166 344 204 328 211C314 217 302 202 294 184C284 162 268 150 248 150H112C92 150 76 162 66 184C58 202 46 217 32 211C16 204 14 166 20 124C26 80 42 44 78 34Z"/><path fill="none" stroke="#7d8b98" stroke-opacity=".45" stroke-width="1.5" d="M80 38C112 29 248 29 280 38"/><rect x="122" y="32" width="116" height="62" rx="9" fill="url(#ctp)" stroke="#1a2026"/><path d="M62 80h14v-14h14v14h14v14h-14v14h-14v-14h-14z" fill="url(#cbt)" stroke="#11161b"/><g fill="url(#cst)" stroke="#0d1115" stroke-width="1.5"><circle cx="130" cy="128" r="19"/><circle cx="230" cy="128" r="19"/></g><g fill="none" stroke="#4d5963"><circle cx="130" cy="128" r="11"/><circle cx="230" cy="128" r="11"/></g>)SVG";
 
+String makeControllerSvg( ControllerDiagram mode ) {
     String h;
-    h.reserve(2400);
-    h += R"SVG(<svg viewBox="0 0 360 195" role="img" aria-label=")SVG";
-    h += pairing
-        ? "DualSense: hold Create, left of the touchpad, and PS, below the touchpad"
-        : "DualSense: hold OPTIONS, right of the touchpad, and Triangle, top face button";
-    h += R"SVG("><path d="M60 40Q160 20 260 40Q300 50 310 110Q318 170 285 178Q262 184 240 150H80Q58 184 35 178Q2 170 10 110Q20 50 60 40Z" fill="#202d37" stroke="#9fb3c0" stroke-width="2"/>
-<rect x="115" y="38" width="90" height="48" rx="6" fill="#2a3a46" stroke="#9fb3c0"/>
-<text x="160" y="66" fill="#9fb3c0" font-family="Arial" font-size="10" text-anchor="middle">touchpad</text>
-<path d="M62 80h16M70 72v16" stroke="#9fb3c0" stroke-width="7" stroke-linecap="round"/>
-<g stroke="#9fb3c0"><circle cx="115" cy="125" r="14" fill="#2a3a46"/><circle cx="205" cy="125" r="14" fill="#2a3a46"/>)SVG";
-
-    // Create (left of touchpad), Options (right), PS (center)
-    h += "<rect x=\"95\" y=\"42\" width=\"8\" height=\"14\" rx=\"4\" fill=\"";
-    h += pairing ? on : off;
-    h += "\"/><rect x=\"217\" y=\"42\" width=\"8\" height=\"14\" rx=\"4\" fill=\"";
-    h += pairing ? off : on;
-    h += "\"/><circle cx=\"160\" cy=\"112\" r=\"8\" fill=\"";
-    h += pairing ? on : off;
-    // Face buttons: Triangle (top), Circle, Cross, Square
-    h += "\"/><circle cx=\"250\" cy=\"62\" r=\"8\" fill=\"";
-    h += pairing ? off : on;
-    h += R"SVG("/><circle cx="272" cy="82" r="8" fill="#324958"/><circle cx="250" cy="102" r="8" fill="#324958"/><circle cx="228" cy="82" r="8" fill="#324958"/></g>
-<path d="M250 57l-4 7h8z" fill="none" stroke="#eee" stroke-width="1.2"/>
-<g stroke="#c5e88a" stroke-width="1.5" fill="none">)SVG";
-
-    if (pairing) {
-        h += R"SVG(<path d="M99 42L84 20M160 120v38"/></g><g fill="#eee" font-family="Arial" font-size="12"><text x="80" y="17" text-anchor="end">Create</text><text x="160" y="172" text-anchor="middle">PS</text></g>)SVG";
-    } else {
-        h += R"SVG(<path d="M221 42l15-22M258 62h48"/></g><g fill="#eee" font-family="Arial" font-size="12"><text x="238" y="17">OPTIONS</text><text x="310" y="66">Triangle</text></g>)SVG";
+    h.reserve(4200);
+    // The button map needs room for side labels; the others are cropped
+    // to the controller so they display larger on a phone.
+    h += mode == CTRL_MAP
+        ? "<svg viewBox=\"0 0 420 250\" role=\"img\" aria-label=\""
+        : "<svg viewBox=\"34 2 352 244\" role=\"img\" aria-label=\"";
+    switch (mode) {
+        case CTRL_MAP: h += "Controller button map: L1, Create, OPTIONS, R1, Triangle, PS, left stick and right stick"; break;
+        case CTRL_PAIR: h += "Pairing: hold Create, left of the touchpad, and PS, between the sticks"; break;
+        case CTRL_COMBO: h += "Configuration mode: hold OPTIONS, right of the touchpad, and Triangle, the top face button"; break;
+        case CTRL_TANK: h += "Tank drive: left stick up and down drives the left track; right stick up and down drives the right track"; break;
+        case CTRL_ARCADE: h += "Arcade drive: left stick up and down is throttle for both tracks; right stick left and right steers"; break;
     }
-
-    h += "</svg>";
+    h += "\"><g transform=\"translate(30 16)\">";
+    h += CTRL_SVG_COMMON;
+    switch (mode) {
+        case CTRL_MAP:
+            h += R"SVG(<g stroke="#11161b"><rect x="103" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><rect x="249" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><circle cx="180" cy="126" r="9" fill="url(#cbt)"/><circle cx="279" cy="62" r="9.5" fill="url(#cbt)"/><circle cx="301" cy="84" r="9.5" fill="url(#cbt)"/><circle cx="279" cy="106" r="9.5" fill="url(#cbt)"/><circle cx="257" cy="84" r="9.5" fill="url(#cbt)"/></g><text x="180" y="129.5" font-family="Arial" font-size="8" font-weight="bold" text-anchor="middle" fill="#aab5bf">PS</text><g fill="none" stroke-width="1.6" stroke="#c9d2da"><path d="M279 57l-5 8.5h10z" stroke="#c9d2da"/><circle cx="301" cy="84" r="4.5"/><path d="M275 102l8 8m0-8l-8 8"/><rect x="253" y="80" width="8" height="8"/></g><g stroke="#c5e88a" stroke-width="1.5" fill="none"><path d="M72 26L46 14M104 46H46M288 26l30-12M253 42l-13-30M288 58l42-14M180 136v42M130 147l-26 53M230 147l26 53"/></g><g fill="#eee" font-family="Arial" font-weight="bold" font-size="13"><text x="42" y="18" text-anchor="end">L1</text><text x="42" y="50" text-anchor="end">Create</text><text x="322" y="18">R1</text><text x="236" y="9" text-anchor="middle">OPTIONS</text><text x="334" y="48">Triangle</text><text x="180" y="194" text-anchor="middle">PS</text><text x="100" y="214" text-anchor="middle">Left stick</text><text x="260" y="214" text-anchor="middle">Right stick</text></g></g></svg>)SVG";
+            break;
+        case CTRL_PAIR:
+            h += R"SVG(<circle cx="107" cy="50" r="12" fill="#c5e88a" opacity=".55" filter="url(#cgl)"/><circle cx="180" cy="126" r="12" fill="#c5e88a" opacity=".55" filter="url(#cgl)"/><g stroke="#11161b"><rect x="103" y="42" width="8" height="16" rx="4" fill="url(#chl)"/><rect x="249" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><circle cx="180" cy="126" r="9" fill="url(#chl)"/><circle cx="279" cy="62" r="9.5" fill="url(#cbt)"/><circle cx="301" cy="84" r="9.5" fill="url(#cbt)"/><circle cx="279" cy="106" r="9.5" fill="url(#cbt)"/><circle cx="257" cy="84" r="9.5" fill="url(#cbt)"/></g><text x="180" y="129.5" font-family="Arial" font-size="8" font-weight="bold" text-anchor="middle" fill="#1c2a10">PS</text><g fill="none" stroke-width="1.6" stroke="#c9d2da"><path d="M279 57l-5 8.5h10z" stroke="#c9d2da"/><circle cx="301" cy="84" r="4.5"/><path d="M275 102l8 8m0-8l-8 8"/><rect x="253" y="80" width="8" height="8"/></g><g stroke="#c5e88a" stroke-width="1.5" fill="none"><path d="M104 42L84 16M180 136v44"/></g><g fill="#eee" font-family="Arial" font-weight="bold" font-size="15"><text x="80" y="14" text-anchor="end">Create</text><text x="180" y="196" text-anchor="middle">PS</text></g></g></svg>)SVG";
+            break;
+        case CTRL_COMBO:
+            h += R"SVG(<circle cx="253" cy="50" r="12" fill="#c5e88a" opacity=".55" filter="url(#cgl)"/><circle cx="279" cy="62" r="12" fill="#c5e88a" opacity=".55" filter="url(#cgl)"/><g stroke="#11161b"><rect x="103" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><rect x="249" y="42" width="8" height="16" rx="4" fill="url(#chl)"/><circle cx="180" cy="126" r="9" fill="url(#cbt)"/><circle cx="279" cy="62" r="9.5" fill="url(#chl)"/><circle cx="301" cy="84" r="9.5" fill="url(#cbt)"/><circle cx="279" cy="106" r="9.5" fill="url(#cbt)"/><circle cx="257" cy="84" r="9.5" fill="url(#cbt)"/></g><text x="180" y="129.5" font-family="Arial" font-size="8" font-weight="bold" text-anchor="middle" fill="#aab5bf">PS</text><g fill="none" stroke-width="1.6" stroke="#c9d2da"><path d="M279 57l-5 8.5h10z" stroke="#1c2a10"/><circle cx="301" cy="84" r="4.5"/><path d="M275 102l8 8m0-8l-8 8"/><rect x="253" y="80" width="8" height="8"/></g><g stroke="#c5e88a" stroke-width="1.5" fill="none"><path d="M253 42l-6-26M288 60l30-40"/></g><g fill="#eee" font-family="Arial" font-weight="bold" font-size="15"><text x="247" y="13" text-anchor="middle">OPTIONS</text><text x="318" y="15" text-anchor="middle">Triangle</text></g></g></svg>)SVG";
+            break;
+        case CTRL_TANK:
+            h += R"SVG(<g stroke="#11161b"><rect x="103" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><rect x="249" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><circle cx="180" cy="126" r="9" fill="url(#cbt)"/><circle cx="279" cy="62" r="9.5" fill="url(#cbt)"/><circle cx="301" cy="84" r="9.5" fill="url(#cbt)"/><circle cx="279" cy="106" r="9.5" fill="url(#cbt)"/><circle cx="257" cy="84" r="9.5" fill="url(#cbt)"/></g><text x="180" y="129.5" font-family="Arial" font-size="8" font-weight="bold" text-anchor="middle" fill="#aab5bf">PS</text><g fill="none" stroke-width="1.6" stroke="#c9d2da"><path d="M279 57l-5 8.5h10z" stroke="#c9d2da"/><circle cx="301" cy="84" r="4.5"/><path d="M275 102l8 8m0-8l-8 8"/><rect x="253" y="80" width="8" height="8"/></g><circle cx="130" cy="128" r="16" fill="#c5e88a" opacity=".35" filter="url(#cgl)"/><circle cx="230" cy="128" r="16" fill="#c5e88a" opacity=".35" filter="url(#cgl)"/><path d="M130 106v44" stroke="#c5e88a" stroke-width="3.5" fill="none" marker-start="url(#car)" marker-end="url(#car)"/><path d="M230 106v44" stroke="#c5e88a" stroke-width="3.5" fill="none" marker-start="url(#car)" marker-end="url(#car)"/><g fill="#eee" font-family="Arial" font-weight="bold" font-size="16" text-anchor="middle"><text x="130" y="190">Left track</text><text x="230" y="190">Right track</text></g><g fill="#b8c6d1" font-family="Arial" font-size="13" text-anchor="middle"><text x="130" y="207">fwd / rev</text><text x="230" y="207">fwd / rev</text></g></g></svg>)SVG";
+            break;
+        case CTRL_ARCADE:
+            h += R"SVG(<g stroke="#11161b"><rect x="103" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><rect x="249" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><circle cx="180" cy="126" r="9" fill="url(#cbt)"/><circle cx="279" cy="62" r="9.5" fill="url(#cbt)"/><circle cx="301" cy="84" r="9.5" fill="url(#cbt)"/><circle cx="279" cy="106" r="9.5" fill="url(#cbt)"/><circle cx="257" cy="84" r="9.5" fill="url(#cbt)"/></g><text x="180" y="129.5" font-family="Arial" font-size="8" font-weight="bold" text-anchor="middle" fill="#aab5bf">PS</text><g fill="none" stroke-width="1.6" stroke="#c9d2da"><path d="M279 57l-5 8.5h10z" stroke="#c9d2da"/><circle cx="301" cy="84" r="4.5"/><path d="M275 102l8 8m0-8l-8 8"/><rect x="253" y="80" width="8" height="8"/></g><circle cx="130" cy="128" r="16" fill="#c5e88a" opacity=".35" filter="url(#cgl)"/><circle cx="230" cy="128" r="16" fill="#c5e88a" opacity=".35" filter="url(#cgl)"/><path d="M130 106v44" stroke="#c5e88a" stroke-width="3.5" fill="none" marker-start="url(#car)" marker-end="url(#car)"/><path d="M208 128h44" stroke="#c5e88a" stroke-width="3.5" fill="none" marker-start="url(#car)" marker-end="url(#car)"/><g fill="#eee" font-family="Arial" font-weight="bold" font-size="16" text-anchor="middle"><text x="130" y="190">Throttle</text><text x="230" y="190">Steering</text></g><g fill="#b8c6d1" font-family="Arial" font-size="13" text-anchor="middle"><text x="130" y="207">both tracks</text><text x="230" y="207">left / right</text></g></g></svg>)SVG";
+            break;
+    }
     return h;
 }
 
@@ -2544,8 +2548,9 @@ String makeControllerSvg( bool pairing ) {
 String makeControllerCardHtml() {
     String h;
     h.reserve(3600);
-    h += R"HTML(<section class="card"><h2>Controller</h2>
-<table><tr><th>Control</th><th>Action</th></tr>
+    h += R"HTML(<section class="card"><h2>Controller</h2>)HTML";
+    h += makeControllerSvg(CTRL_MAP);
+    h += R"HTML(<table><tr><th>Control</th><th>Action</th></tr>
 <tr><td>OPTIONS</td><td>Arm when released (sticks neutral). Disarm when pressed.</td></tr>
 <tr><td>PS</td><td>E-stop: stops the motors and disarms at once. Never arms.</td></tr>
 <tr><td>L1 / R1</td><td>Low / normal speed profile</td></tr>
@@ -2554,7 +2559,7 @@ String makeControllerCardHtml() {
 </table>
 <p class="note">Denied arming rumbles: 2 pulses = controls not neutral, 3 pulses = battery lockout, Wi-Fi mode or abort. The PS e-stop gives one long rumble.</p>
 <h3>Pairing a DualSense</h3>)HTML";
-    h += makeControllerSvg(true);
+    h += makeControllerSvg(CTRL_PAIR);
     h += R"HTML(<p><b>Hold Create + PS until the controller light flashes rapidly.</b> Create is the small button on the left of the touchpad. OPTIONS, on the right, is not the pairing button. Once paired, press PS to reconnect.</p></section>)HTML";
     return h;
 }
@@ -2570,11 +2575,11 @@ String makeWebPage() {
     html += FIRMWARE_VERSION;
     html += R"HTML(</p><section class="card"><h2>Live status</h2><div id="status">Connecting...</div></section>
 <form method="post" action="/save"><section class="card"><h2>Drive Configuration</h2>
-<div class="grid"><div><h3>Tank drive</h3>
-<svg viewBox="0 0 300 145" role="img" aria-label="Tank drive: left stick Y controls left track; right stick Y controls right track">
-<g fill="#324958" stroke="#c5e88a" stroke-width="3"><circle cx="75" cy="62" r="35"/><circle cx="225" cy="62" r="35"/><path d="M75 16v92m-9-82 9-10 9 10m-18 72 9 10 9-10M225 16v92m-9-82 9-10 9 10m-18 72 9 10 9-10" fill="none"/></g><g fill="white" font-size="12" text-anchor="middle"><text x="75" y="126">Left Track</text><text x="225" y="126">Right Track</text><text x="75" y="141">Forward / Reverse</text><text x="225" y="141">Forward / Reverse</text></g></svg></div>
-<div><h3>Arcade drive</h3><svg viewBox="0 0 300 145" role="img" aria-label="Arcade drive: left stick Y is throttle for both tracks; right stick X steers left and right">
-<g fill="#324958" stroke="#c5e88a" stroke-width="3"><circle cx="75" cy="62" r="35"/><circle cx="225" cy="62" r="35"/><path d="M75 16v92m-9-82 9-10 9 10m-18 72 9 10 9-10M179 62h92m-82-9-10 9 10 9m72-18 10 9-10 9" fill="none"/></g><g fill="white" font-size="12" text-anchor="middle"><text x="75" y="126">Both Tracks</text><text x="75" y="141">Forward / Reverse</text><text x="225" y="126">Right Stick</text><text x="225" y="141">Left / Right Steering</text></g></svg></div></div>
+<div class="grid"><div><h3>Tank drive</h3>)HTML";
+    html += makeControllerSvg(CTRL_TANK);
+    html += R"HTML(</div><div><h3>Arcade drive</h3>)HTML";
+    html += makeControllerSvg(CTRL_ARCADE);
+    html += R"HTML(</div></div>
 <p>Arcade: left stick Y controls throttle; right stick X controls steering. Right steering commands right yaw, including in reverse. Proportional steering requires throttle. Pivot steering permits turning in place.</p>)HTML";
     html += "<label>Low-speed limit (%)";
     html += "<input type=\"number\" name=\"lowSpeed\" min=\"5\" max=\"100\" step=\"1\" required value=\"";
@@ -2707,7 +2712,7 @@ String makeWebPage() {
     if (settings.batteryRumble) html += " checked";
     html += ">Battery warning rumble</label>";
     html += R"HTML(</section><section class="card"><h2>Wi-Fi Configuration</h2>)HTML";
-    html += makeControllerSvg(false);
+    html += makeControllerSvg(CTRL_COMBO);
     html += R"HTML(<p>Hold OPTIONS + Triangle with drive disarmed and sticks neutral. The status light flashes purple during the hold, then stays purple while configuration is active. Hold again to leave. Motors stay disabled throughout; after leaving, center the sticks and press OPTIONS to re-arm. Wi-Fi: ESPRC / ESPRC123.</p><p class="note">The inactivity timeout counts from your last page load or button press here; the live status updates do not keep Wi-Fi on.</p>)HTML";
     html += "<label>Wi-Fi inactivity timeout (sec)";
     html += "<input type=\"number\" name=\"wifiTimeout\" min=\"30\" max=\"3600\" step=\"1\" required value=\"";

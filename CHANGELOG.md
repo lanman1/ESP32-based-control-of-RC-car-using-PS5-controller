@@ -17,6 +17,7 @@ Compiled against `esp32-bluepad32:esp32@4.1.0` and Adafruit NeoPixel 1.15.5 (abo
 - Reset reason on Serial at boot and in the web Live status (S2).
 - Web UI: battery divider wiring diagram (H1), Controller card with controls table and Create + PS pairing diagram (H2), OPTIONS + Triangle diagram in the Wi-Fi card (U1), Status Indicator Colors legend (U2), GPIO Map (U3).
 - Web Live status shows the active protection (battery lockout, power limit, stale-data stop).
+- Web UI controller diagrams redrawn in a filled, shaded style: button map (Controller card), tank and arcade stick diagrams (Drive card), pairing and OPTIONS + Triangle diagrams.
 
 ### Fixed
 - OPTIONS now arms on release, only if Triangle was not pressed during that press, so the Wi-Fi combo can no longer arm the vehicle. Disarm still happens on press (R1).
