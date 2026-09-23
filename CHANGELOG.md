@@ -13,6 +13,9 @@ All notable changes to the ESP RC firmware are recorded here. The format follows
 - Battery divider wiring diagram (H1), DualSense Create + PS pairing diagram (H2), and DualSense OPTIONS + Triangle Wi-Fi combo diagram (U1) in the web UI.
 - Remaining review findings R3-R5, R7-R10 and minor items M1-M6.
 
+### Documentation
+- README no longer describes the host regression tests; `tests/test_firmware.py` never existed in this repository (D2, T1).
+
 ## [0.6.0] - 2026-09
 
 Baseline imported from the generated `ESP32-RC-Tank-WebUI-v6.ino`. Not compiled or hardware-tested as part of this import.

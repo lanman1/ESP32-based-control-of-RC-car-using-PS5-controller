@@ -42,9 +42,9 @@ Status: `open`, `in progress (branch)`, `done (version)`.
 | ID | Title | Status |
 |----|-------|--------|
 | D1 | README claims the settings namespace is migrated | done (namespace renamed to `esprc`) |
-| D2 | README references missing `tests/` | partly done (noted as missing); see T1 |
+| D2 | README references missing `tests/` | done (tests section removed) |
 | D3 | Critical recovery wording ambiguous | open (after R6) |
-| T1 | Commit `tests/test_firmware.py` if it exists locally | waiting on owner |
+| T1 | Commit `tests/test_firmware.py` if it exists locally | done (file does not exist) |
 
 ## Minor
 
@@ -120,7 +120,7 @@ Audit comments, web help, README, and Serial text for pairing instructions; all 
 After R6, state explicitly in README and web help which voltage clears a critical Disable Drive lockout.
 
 ### T1 - Host tests
-README describes `tests/test_firmware.py`, but it is not in the repo. Owner to confirm whether it exists locally and should be committed.
+Resolved 2026-09-23: the owner confirmed `tests/test_firmware.py` does not exist. The README tests section was replaced with a note that there are no automated tests yet.
 
 ### M1-M6
 - M1: consider a per-device password derived from the MAC. Deferred at owner request.

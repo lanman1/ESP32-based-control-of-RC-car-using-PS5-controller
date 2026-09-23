@@ -910,12 +910,4 @@ The sketch is kept at its existing repository path. For Arduino IDE/CLI, copy `C
 arduino-cli compile --fqbn esp32-bluepad32:esp32:esp32 ESP32-RC-Tank-WebUI
 ```
 
-Host regression tests (`tests/test_firmware.py`) were used during v0.5 development but are **not yet committed to this repository**, so the commands below cannot currently be run from a fresh clone. They extract and execute the actual firmware functions with simulated I/O:
-
-```sh
-python tests/test_firmware.py --compiler g++
-# Alternatively:
-python tests/test_firmware.py --compiler /path/to/zig --zig
-```
-
-Tests cover 127,008 mixer combinations, output caps after trim/ramping, neutral/button-release arming, configuration/disconnect lockouts, battery qualification and disable behavior, invalid configuration values, populated web fields, and offline SVG diagrams. They do not replace testing Bluetooth, ADC accuracy, PWM polarity, and motor behavior on the vehicle. With tracks raised, verify both drive modes, steering direction, power-cycle reconnection, disconnect stopping, Wi-Fi entry/exit, and battery warnings before ground operation.
+There are no automated tests in this repository yet. Validation is done on hardware. With tracks raised, verify both drive modes, steering direction, power-cycle reconnection, disconnect stopping, Wi-Fi entry/exit, and battery warnings before ground operation.
