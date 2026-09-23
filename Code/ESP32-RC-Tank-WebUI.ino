@@ -304,6 +304,8 @@ bool emergencyAbort = false;
 
 bool previousOptions = true;
 bool armButtonReleased = false;
+bool optionsPressValid = false;      // R1: OPTIONS press eligible to arm on release
+bool triangleDuringOptions = false;  // R1: Triangle seen during the current OPTIONS press
 unsigned long lastControllerReport = 0;
 const unsigned long CONTROLLER_TIMEOUT_MS = 2000;
 unsigned long lastVerboseControllerDebug = 0;
@@ -2551,12 +2553,69 @@ void noteWebActivity() {
 // WEB PAGE
 // ======================================================================
 
+// Reference card: status colors (U2).
+// Keep this list in the same order and colors as getStatusColor().
+// If R5 changes the precedence or colors, update this card too.
+String makeStatusLegendHtml() {
+    String h;
+    h.reserve(2200);
+    h += R"HTML(<section class="card"><h2>Status Indicator Colors</h2>
+<p>Shown on the status pixel (LED 0) and the DualSense lightbar. When more than one applies, the one higher in this list wins.</p>
+<table><tr><th>Color</th><th>Meaning</th></tr>
+<tr><td><span class="sw blink" style="background:#ff0000"></span>Flashing red</td><td>Emergency abort (PRG button). Power-cycle to clear.</td></tr>
+<tr><td><span class="sw" style="background:#ff0000"></span>Red</td><td>Critical vehicle battery</td></tr>
+<tr><td><span class="sw" style="background:#ff4b00"></span>Orange</td><td>Low vehicle battery</td></tr>
+<tr><td><span class="sw blink" style="background:#ff8c00"></span>Flashing yellow</td><td>OPTIONS + Triangle being held</td></tr>
+<tr><td><span class="sw" style="background:#ff9600"></span>Yellow</td><td>Wi-Fi configuration active (motors disabled)</td></tr>
+<tr><td><span class="sw pulse" style="background:#0000ff"></span>Blue pulse</td><td>Waiting for controller (status LED only; the lightbar is off until a controller connects)</td></tr>
+<tr><td><span class="sw pulse" style="background:#0096dc"></span>Cyan pulse</td><td>Controller initializing: center sticks and release triggers</td></tr>
+<tr><td><span class="sw" style="background:#00c800"></span>Green</td><td>Motors armed</td></tr>
+<tr><td><span class="sw" style="background:#0000b4"></span>Solid blue</td><td>Controller ready, motors disarmed</td></tr>
+</table><p>Battery colors appear only when battery monitoring and the matching warning option (status LED or controller light) are enabled, so the two can differ. The LED brightness setting affects the status LED only.</p></section>)HTML";
+    return h;
+}
+
+
+// Reference card: GPIO assignment (U3). Built from the pin #defines
+// so it always matches the firmware.
+String makeGpioMapHtml() {
+    String h;
+    h.reserve(1600);
+    h += R"HTML(<section class="card"><h2>GPIO Map</h2><table><tr><th>GPIO</th><th>Function</th></tr>)HTML";
+
+    auto row = [&h](int pin, const char* fn) {
+        h += "<tr><td>";
+        h += String(pin);
+        h += "</td><td>";
+        h += fn;
+        h += "</td></tr>";
+    };
+
+    row(M1A_PIN, "M1A: left motor input A (MDD3A)");
+    row(M1B_PIN, "M1B: left motor input B (MDD3A)");
+    row(M2A_PIN, "M2A: right motor input A (MDD3A)");
+    row(M2B_PIN, "M2B: right motor input B (MDD3A)");
+    row(PIXEL_PIN, "WS281x LED data (LED 0 = status)");
+    row(BATTERY_ADC_PIN, "Battery voltage sense (divider, ADC input only)");
+    row(ABORT_BUTTON, "BOOT / PRG button: emergency abort");
+    row(SERVO1_PIN, "Reserved: servo 1");
+    row(AUX1_PIN, "Reserved: auxiliary");
+
+    h += "</table><p>Motor PWM: ";
+    h += String(PWM_FREQ / 1000);
+    h += " kHz, ";
+    h += String(PWM_RESOLUTION);
+    h += "-bit. All grounds must be common.</p></section>";
+    return h;
+}
+
+
 String makeWebPage() {
     String html;
     html.reserve(15000);
     html += R"HTML(<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>ESPRC</title>
-<style>body{font-family:Arial,sans-serif;background:#101820;color:#eee;margin:0}main{max-width:780px;margin:auto;padding:20px}.card{background:#202d37;padding:20px;border-radius:12px;margin:16px 0}label{display:block;margin:14px 0}input,select,button{font:inherit;padding:9px;border-radius:5px}input:not([type=checkbox]),select{display:block;box-sizing:border-box;width:100%;margin-top:5px}button{cursor:pointer;background:#c5e88a;color:#182119;border:0}svg{width:100%;height:auto}p{line-height:1.5}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:600px){.grid{grid-template-columns:1fr}}#status{white-space:pre-line;line-height:1.6}</style>
+<style>body{font-family:Arial,sans-serif;background:#101820;color:#eee;margin:0}main{max-width:780px;margin:auto;padding:20px}.card{background:#202d37;padding:20px;border-radius:12px;margin:16px 0}label{display:block;margin:14px 0}input,select,button{font:inherit;padding:9px;border-radius:5px}input:not([type=checkbox]),select{display:block;box-sizing:border-box;width:100%;margin-top:5px}button{cursor:pointer;background:#c5e88a;color:#182119;border:0}svg{width:100%;height:auto}p{line-height:1.5}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:600px){.grid{grid-template-columns:1fr}}#status{white-space:pre-line;line-height:1.6}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:7px 6px;border-bottom:1px solid #34444f;vertical-align:middle}th{color:#9fb3c0;font-weight:normal}.sw{display:inline-block;width:16px;height:16px;border-radius:50%;margin-right:8px;vertical-align:middle;box-shadow:0 0 0 1px #0006}.blink{animation:blink .4s steps(1) infinite}.pulse{animation:pulse 3s ease-in-out infinite}@keyframes blink{50%{opacity:.12}}@keyframes pulse{50%{opacity:.2}}@media(prefers-reduced-motion:reduce){.blink,.pulse{animation:none}}</style>
 </head><body><main><h1>ESPRC</h1><p>Firmware )HTML";
     html += FIRMWARE_VERSION;
     html += R"HTML(</p><section class="card"><h2>Live status</h2><div id="status">Connecting...</div></section>
@@ -2709,8 +2768,10 @@ String makeWebPage() {
 <form method="post" action="/defaults"><button>Restore Factory Defaults</button></form>
 <form method="post" action="/pair-reset" onsubmit="return confirm('Forget saved controller pairing?')"><button>Clear controller pairing</button></form>
 <p>Bluepad32 retains pairing keys across restarts. Press PS to reconnect. After clearing pairing, turn off the old controller and hold Create + PS on the replacement. Motors remain disarmed.</p>
-<form method="post" action="/wifi-off"><button>Shut Down Wi-Fi</button></form></section>
-<script>async function updateStatus(){try{const r=await fetch('/status',{cache:'no-store'});if(!r.ok)throw Error();const d=await r.json();document.getElementById('status').textContent='Controller: '+d.controller+' ('+d.controllerBattery+')\nDrive: '+d.drive+' / '+d.profile+'\nMotor output: L '+d.left+'%, R '+d.right+'%\nVehicle battery: '+d.vehicleVoltage+' / '+d.batteryState+'\nWi-Fi clients: '+d.clients+'\nUptime: '+d.uptime;}catch(e){document.getElementById('status').textContent='Connection lost. Reconnect to ESPRC Wi-Fi.';}}updateStatus();setInterval(updateStatus,2000);</script>
+<form method="post" action="/wifi-off"><button>Shut Down Wi-Fi</button></form></section>)HTML";
+    html += makeStatusLegendHtml();
+    html += makeGpioMapHtml();
+    html += R"HTML(<script>async function updateStatus(){try{const r=await fetch('/status',{cache:'no-store'});if(!r.ok)throw Error();const d=await r.json();document.getElementById('status').textContent='Controller: '+d.controller+' ('+d.controllerBattery+')\nDrive: '+d.drive+' / '+d.profile+'\nMotor output: L '+d.left+'%, R '+d.right+'%\nVehicle battery: '+d.vehicleVoltage+' / '+d.batteryState+'\nWi-Fi clients: '+d.clients+'\nUptime: '+d.uptime;}catch(e){document.getElementById('status').textContent='Connection lost. Reconnect to ESPRC Wi-Fi.';}}updateStatus();setInterval(updateStatus,2000);</script>
 </main></body></html>)HTML";
     return html;
 }
@@ -4030,6 +4091,79 @@ void onDisconnectedController(
 
 
 // ======================================================================
+// ARMING
+// ======================================================================
+
+// Called on a valid OPTIONS release while disarmed (R1).
+// Every refusal is logged and rumbles so the driver knows (R3).
+void tryArmFromButton() {
+
+    if (emergencyAbort || wifiConfigActive || motorsArmed) {
+        return;
+    }
+
+
+    bool batteryLockout =
+        settings.batteryEnabled &&
+        (batteryState == BATTERY_CRITICAL || batteryState == BATTERY_UNKNOWN) &&
+        settings.criticalBehavior == 2;
+
+
+    if (batteryLockout) {
+
+        Serial.println(
+            batteryState == BATTERY_UNKNOWN
+                ? "Arming blocked: battery reading not qualified yet (Disable Drive)."
+                : "Arming blocked: critical battery (Disable Drive)."
+        );
+
+        // Three pulses: battery lockout.
+        queueRumble(
+            3,
+            80,
+            80,
+            30,
+            30
+        );
+
+        return;
+    }
+
+
+    if (!sticksCentered()) {
+
+        Serial.println(
+            "Arming blocked: sticks/triggers must be neutral."
+        );
+
+        // Two pulses: controls not neutral.
+        queueRumble(
+            2,
+            80,
+            80,
+            30,
+            30
+        );
+
+        return;
+    }
+
+
+    motorsArmed = true;
+    stopMotorsImmediate();
+    Serial.println("Drive state: ARMED");
+
+    queueRumble(
+        1,
+        120,
+        0,
+        60,
+        40
+    );
+}
+
+
+// ======================================================================
 // BUTTON PROCESSING
 // ======================================================================
 
@@ -4039,6 +4173,8 @@ void processButtons() {
         !controller ||
         controllerState != CONTROLLER_READY
     ) {
+        optionsPressValid = false;
+        triangleDuringOptions = false;
         return;
     }
 
@@ -4052,103 +4188,63 @@ void processButtons() {
 
 
     // --------------------------------------------------------------
-    // OPTIONS = Arm / Disarm
+    // OPTIONS = Arm / Disarm (R1)
     //
-    // Suppress normal OPTIONS action while Triangle is also held.
+    // Armed:    disarm immediately on the OPTIONS press.
+    // Disarmed: arm on OPTIONS release, and only if Triangle was not
+    //           pressed at any point during that press. This keeps the
+    //           OPTIONS + Triangle Wi-Fi combo from arming the vehicle,
+    //           whichever button goes down first.
     // --------------------------------------------------------------
 
     bool options =
         controller->miscStart();
 
+    bool optionsPressed =
+        options && !previousOptions;
 
-    if (
-        options &&
-        !previousOptions &&
-        armButtonReleased &&
-        !triangle
-    ) {
+    bool optionsReleased =
+        !options && previousOptions;
+
+
+    if (optionsPressed) {
+
+        optionsPressValid =
+            armButtonReleased && !triangle;
+
+        triangleDuringOptions =
+            triangle;
+
+        if (motorsArmed) {
+
+            // Disarm never waits for release.
+            motorsArmed = false;
+            stopMotorsImmediate();
+            Serial.println("Drive state: DISARMED");
+
+            // This press is used up; releasing it must not re-arm.
+            optionsPressValid = false;
+        }
+    }
+
+
+    if (options && triangle) {
+        triangleDuringOptions = true;
+    }
+
+
+    if (optionsReleased) {
 
         if (
-            !emergencyAbort &&
-            !wifiConfigActive
+            optionsPressValid &&
+            !triangleDuringOptions &&
+            armButtonReleased
         ) {
-
-            bool canArm =
-                true;
-
-
-            if (
-                settings.batteryEnabled &&
-                (batteryState == BATTERY_CRITICAL || batteryState == BATTERY_UNKNOWN) &&
-                settings.criticalBehavior ==
-                    2
-            ) {
-
-                canArm =
-                    false;
-            }
-
-
-            if (
-                !motorsArmed &&
-                canArm
-            ) {
-
-                // Require sticks centered before arming.
-                if (
-                    sticksCentered()
-                ) {
-
-                    motorsArmed =
-                        true;
-
-                    stopMotorsImmediate();
-
-                    Serial.println(
-                        "Drive state: ARMED"
-                    );
-
-
-                    queueRumble(
-                        1,
-                        120,
-                        0,
-                        60,
-                        40
-                    );
-
-                } else {
-
-                    Serial.println(
-                        "Arming blocked: sticks/triggers must be neutral."
-                    );
-
-                    queueRumble(
-                        2,
-                        80,
-                        80,
-                        30,
-                        30
-                    );
-                }
-
-            } else {
-
-                bool wasArmed =
-                    motorsArmed;
-
-                motorsArmed =
-                    false;
-
-                stopMotorsImmediate();
-
-                if (wasArmed) {
-                    Serial.println(
-                        "Drive state: DISARMED"
-                    );
-                }
-            }
+            tryArmFromButton();
         }
+
+        optionsPressValid = false;
+        triangleDuringOptions = false;
     }
 
 

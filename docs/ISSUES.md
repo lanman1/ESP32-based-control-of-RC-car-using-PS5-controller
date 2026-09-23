@@ -10,16 +10,18 @@ Status: `open`, `in progress (branch)`, `done (version)`.
 
 | ID | Title | Status |
 |----|-------|--------|
-| R1 | OPTIONS pressed before Triangle arms instead of entering config | open |
+| R1 | OPTIONS pressed before Triangle arms instead of entering config | code done, untested |
 | R2 | Second controller can occupy the slot and strand the vehicle | open |
 | R6 | Disable Drive lets a LiPo cycle toward over-discharge | open |
 | H3 | Staged / deferred Wi-Fi shutdown (sys_evt stack-canary crash) | open |
+| S1 | Stop motors quickly when controller data stops (before the 2 s disarm) | open |
+| S2 | Log and show the ESP32 reset reason | open |
 
 ## Bugs and design
 
 | ID | Title | Status |
 |----|-------|--------|
-| R3 | Denied arming gives no feedback | open |
+| R3 | Denied arming gives no feedback | code done, untested |
 | R4 | Data-timeout path leaves stale Wi-Fi combo state | open |
 | R5 | Battery colors hide Wi-Fi hold / active indication | open |
 | R7 | Corrupt-settings recovery can lock out a vehicle with no divider | open |
@@ -36,6 +38,8 @@ Status: `open`, `in progress (branch)`, `done (version)`.
 | H4 | Bluepad32 init order; virtual device failure non-fatal | open |
 | H5 | Pairing documentation cleanup (Create + PS, not Options) | open |
 | U1 | DualSense OPTIONS + Triangle Wi-Fi combo diagram in web UI | open |
+| U2 | Status indicator color legend in web UI | code done, untested |
+| U3 | GPIO map in web UI | code done, untested |
 
 ## Documentation
 
@@ -64,6 +68,18 @@ Status: `open`, `in progress (branch)`, `done (version)`.
 | V1 | Data timeout (2 s) does not falsely disarm with controller held still | open |
 | V2 | GPIO 14 (M2B) boot-time output does not twitch motor 2 | open |
 
+## Future (after 0.7.0)
+
+| ID | Title | Status |
+|----|-------|--------|
+| F1 | Settings backup / restore (JSON download and upload) | future |
+| F2 | Firmware update over Wi-Fi (OTA) | future |
+| F3 | D-pad live max-speed adjustment | future |
+| F4 | Trigger throttle drive mode (R2 forward, L2 reverse) | future |
+| F5 | Lighting engine for pixels 1+ | future |
+| F6 | Servo configuration for GPIO 32 | future |
+| F7 | Dedicated emergency-stop input | future |
+
 ---
 
 ## Details
@@ -79,6 +95,12 @@ Status: `open`, `in progress (branch)`, `done (version)`.
 
 ### H3 - Staged / deferred Wi-Fi shutdown
 Observed `Guru Meditation Error: Core 0 panic'ed` / `Stack canary watchpoint triggered (sys_evt)` when leaving configuration mode with OPTIONS + Triangle. `stopConfigWiFi` (~3395) runs `server.stop()`, `WiFi.softAPdisconnect(true)` and `WiFi.mode(WIFI_OFF)` back to back; the combo (~3867) and idle timeout (~3521) call it immediately. Fix: one state machine serviced from `loop()` with ~150 ms between stages; all three exits only request shutdown. Log each stage and free heap at request. The fix is a hypothesis until confirmed on hardware.
+
+### S1 - Stop motors quickly when controller data stops
+Today nothing happens for `CONTROLLER_TIMEOUT_MS` (2 s) after reports stop, so a vehicle at speed keeps driving for up to 2 s if the Bluetooth link stalls. Add a short motor-stop timeout (about 300 ms, as a constant) that sets motor output to zero without disarming. The existing 2 s timeout still disarms and re-enters INITIALIZING. When reports resume inside 2 s, motors stay at zero until the sticks return to neutral, so the vehicle doesn't lurch. Log the stop once. Check it with V1: a still DualSense keeps sending reports, so holding it still must not trigger S1.
+
+### S2 - Log and show the ESP32 reset reason
+At boot, read `esp_reset_reason()` and print it to Serial as text (power-on, software, panic/crash, interrupt or task watchdog, brownout, deep sleep). Show it in the web UI Live status. This helps diagnose H3 crashes and brownouts under motor load.
 
 ### R3 - Denied arming gives no feedback
 When battery lockout blocks arming, the code falls into the disarm `else` branch and nothing rumbles. Most noticeable during the ~3 s battery qualification after boot. Add a rejection rumble and Serial message.
@@ -119,8 +141,23 @@ Audit comments, web help, README, and Serial text for pairing instructions; all 
 ### D3 - Critical recovery wording
 After R6, state explicitly in README and web help which voltage clears a critical Disable Drive lockout.
 
+### U2 - Status indicator color legend
+Reference card listing every status pixel / lightbar color in `getStatusColor()` priority order, with CSS swatches (flash and pulse animated). Must be updated together with R5.
+
+### U3 - GPIO map
+Reference card built from the pin `#define`s so it always matches the firmware, plus the PWM frequency and resolution.
+
 ### T1 - Host tests
 Resolved 2026-09-23: the owner confirmed `tests/test_firmware.py` does not exist. The README tests section was replaced with a note that there are no automated tests yet.
+
+### F1-F7 - Future features
+- F1: download current settings as JSON and upload them to restore. Protects settings across future NVS changes. It can't help with the 0.7.0 reset, since 0.6.0 lacks it. Already listed in README "Planned Future Improvements".
+- F2: upload firmware from the config web page (Arduino `Update` library). Check first that the partition scheme leaves room for two app images alongside Bluepad32. Also in the README planned list.
+- F3: D-pad up/down changes the max output in steps while driving, with a rumble to confirm. Limits still apply. Decide whether the value is saved.
+- F4: optional car-style mode: R2 = forward, L2 = reverse, left stick X = steering, alongside the tank and arcade modes. Needs neutral-trigger checks for arming, which INITIALIZING already covers.
+- F5: headlights, taillights, brake and reverse lights on pixels 1+, linked to throttle and direction. See README "Planned Lighting Features".
+- F6: servo on GPIO 32 with endpoints, centering and reversing in the web UI.
+- F7: a wired e-stop input separate from the BOOT/PRG button on GPIO 0.
 
 ### M1-M6
 - M1: consider a per-device password derived from the MAC. Deferred at owner request.

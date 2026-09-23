@@ -4,6 +4,13 @@ All notable changes to the ESP RC firmware are recorded here. The format follows
 
 ## [Unreleased] - target 0.7.0
 
+### Added
+- Web UI: Status Indicator Colors and GPIO Map reference cards (U2, U3).
+
+### Fixed
+- OPTIONS now arms on release, only if Triangle was not pressed during that press, so the Wi-Fi combo can no longer arm the vehicle. Disarm still happens on press (R1).
+- Denied arming now rumbles and logs the reason: 3 pulses for battery lockout, 2 for non-neutral controls (R3).
+
 ### Changed
 - **Settings reset on update:** the NVS settings namespace is now `esprc`. Settings saved by 0.6.0 or earlier are not migrated, so the first boot starts from factory defaults. Bluetooth pairing is unaffected.
 
@@ -11,6 +18,7 @@ All notable changes to the ESP RC firmware are recorded here. The format follows
 - Staged / deferred Wi-Fi shutdown for controller, web, and idle-timeout exits (H3).
 - Priority safety fixes: OPTIONS-before-Triangle arming (R1), second controller stranding the vehicle (R2), critical-battery re-arm cycling (R6).
 - Battery divider wiring diagram (H1), DualSense Create + PS pairing diagram (H2), and DualSense OPTIONS + Triangle Wi-Fi combo diagram (U1) in the web UI.
+- Fast motor stop on controller data loss (S1) and reset-reason logging (S2).
 - Remaining review findings R3-R5, R7-R10 and minor items M1-M6.
 
 ### Documentation
