@@ -35,6 +35,7 @@ Status: `open`, `in progress (branch)`, `done (version)`.
 | H2 | DualSense Create + PS pairing SVG in web UI | open |
 | H4 | Bluepad32 init order; virtual device failure non-fatal | open |
 | H5 | Pairing documentation cleanup (Create + PS, not Options) | open |
+| U1 | DualSense OPTIONS + Triangle Wi-Fi combo diagram in web UI | open |
 
 ## Documentation
 
@@ -105,6 +106,9 @@ Inline SVG in the Battery Configuration card: 2S LiPo, battery + to R1 100 kOhm,
 
 ### H2 - DualSense pairing SVG
 Inline controller illustration in the controller section showing Create (small button left of the touchpad) and PS (center). Text: "Hold Create + PS until the controller light flashes rapidly." Make clear Options (right of the touchpad) is not the pairing button.
+
+### U1 - Wi-Fi combo diagram
+Owner request for 0.7.0. Inline SVG in the Wi-Fi Configuration card showing where OPTIONS (small button right of the touchpad) and Triangle (top face button) are, with the text: hold OPTIONS + Triangle for the configured time (default 3 s) while disarmed with sticks centered; the light flashes yellow during the hold; the same combo turns Wi-Fi off. Share one DualSense outline with H2, highlighting different buttons, so the page stays small and Create vs OPTIONS is visibly distinct. Describe the post-R1 press behavior. Offline only, no external resources.
 
 ### H4 - Bluepad32 init order
 Order: `BP32.setup(...)`, `BP32.enableVirtualDevice(false)`, `BP32.enableNewBluetoothConnections(true)`. Currently the last two are swapped (~4361). `DS5: Failed to create virtual device` must not block a gamepad that connects.

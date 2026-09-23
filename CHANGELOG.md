@@ -10,7 +10,7 @@ All notable changes to the ESP RC firmware are recorded here. The format follows
 ### Planned
 - Staged / deferred Wi-Fi shutdown for controller, web, and idle-timeout exits (H3).
 - Priority safety fixes: OPTIONS-before-Triangle arming (R1), second controller stranding the vehicle (R2), critical-battery re-arm cycling (R6).
-- Battery divider wiring diagram (H1) and DualSense Create + PS pairing diagram (H2) in the web UI.
+- Battery divider wiring diagram (H1), DualSense Create + PS pairing diagram (H2), and DualSense OPTIONS + Triangle Wi-Fi combo diagram (U1) in the web UI.
 - Remaining review findings R3-R5, R7-R10 and minor items M1-M6.
 
 ## [0.6.0] - 2026-09
