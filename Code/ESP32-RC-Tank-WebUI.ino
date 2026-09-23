@@ -1,7 +1,16 @@
 /*
  ======================================================================
  ESP RC TANK CONTROLLER
- Firmware 0.5
+ Firmware 0.6.0 - Controller startup state / event-driven diagnostics
+
+ Revision 0.6.0:
+   - Controller connection now enters INITIALIZING before READY.
+   - 1 second Bluetooth settle + neutral/stable-input validation.
+   - Reconnect and Wi-Fi exit never auto-arm the vehicle.
+   - USB Serial is event-driven by default; no 1 Hz status spam.
+   - Optional VERBOSE_CONTROLLER_DEBUG for live control diagnostics.
+   - Retains v0.5 drive modes, web UI graphics, persistent settings,
+     battery monitoring, Wi-Fi behavior, and WROOM GPIO mapping.
 
  ESP32-WROOM-32 / ESP32-WROOM-32E
  Cytron MDD3A
@@ -14,17 +23,17 @@
  PIN ASSIGNMENTS
  ----------------------------------------------------------------------
 
- GPIO 17  -> MDD3A M1A
- GPIO 18  -> MDD3A M1B
+ GPIO 25  -> MDD3A M1A
+ GPIO 26  -> MDD3A M1B
 
- GPIO 22  -> MDD3A M2A
- GPIO 23  -> MDD3A M2B
+ GPIO 27  -> MDD3A M2A
+ GPIO 14  -> MDD3A M2B
 
- GPIO 25  -> WS2811 / WS2812 data
+ GPIO 4   -> WS2811 / WS2812 data
              Pixel 0 reserved for SYSTEM STATUS
 
- GPIO 26  -> Reserved future Servo 1
- GPIO 27  -> Reserved future Servo 2
+ GPIO 32  -> Reserved future Servo 1
+ GPIO 33  -> Reserved future Auxiliary output
 
  GPIO 34  -> Vehicle battery ADC
 
@@ -59,7 +68,8 @@
  STATUS COLORS
  ----------------------------------------------------------------------
 
- Blue pulse      Waiting for PS5 controller
+ Blue pulse      Waiting for controller
+ Cyan pulse      Controller initializing / waiting for neutral
  Blue            Connected / SAFE
  Green           Motors ARMED
  Yellow          Configuration Wi-Fi
@@ -91,7 +101,7 @@
 // VERSION
 // ======================================================================
 
-#define FIRMWARE_VERSION "0.5"
+#define FIRMWARE_VERSION "0.6.0"
 
 
 // ======================================================================
@@ -99,13 +109,13 @@
 // ======================================================================
 
 // MDD3A
-#define M1A_PIN 17
-#define M1B_PIN 18
-#define M2A_PIN 22
-#define M2B_PIN 23
+#define M1A_PIN 25
+#define M1B_PIN 26
+#define M2A_PIN 27
+#define M2B_PIN 14
 
 // WS281x
-#define PIXEL_PIN 25
+#define PIXEL_PIN 4
 #define PIXEL_COUNT 8
 
 Adafruit_NeoPixel pixels(
@@ -116,6 +126,10 @@ Adafruit_NeoPixel pixels(
 
 // Vehicle battery
 #define BATTERY_ADC_PIN 34
+
+// Reserved expansion pins
+#define SERVO1_PIN 32
+#define AUX1_PIN 33
 
 // Divider:
 //
@@ -249,6 +263,34 @@ TankSettings settings;
 
 ControllerPtr controller = nullptr;
 
+enum ControllerState {
+    CONTROLLER_DISCONNECTED,
+    CONTROLLER_INITIALIZING,
+    CONTROLLER_READY
+};
+
+ControllerState controllerState =
+    CONTROLLER_DISCONNECTED;
+
+unsigned long controllerConnectedAt = 0;
+unsigned long controllerNeutralSince = 0;
+
+bool controllerWaitingForNeutralLogged = false;
+bool controllerTimeoutActive = false;
+
+// Allow Bluetooth to settle before accepting any control input.
+// After the settle period, controls must remain neutral briefly.
+const unsigned long CONTROLLER_SETTLE_MS = 1000;
+const unsigned long CONTROLLER_NEUTRAL_STABLE_MS = 250;
+
+// Trigger values are normally 0 when released.
+const int CONTROLLER_TRIGGER_NEUTRAL_MAX = 32;
+
+// Default Serial behavior is event-driven.  Enable this only when
+// live stick / button diagnostics are required.
+constexpr bool VERBOSE_CONTROLLER_DEBUG = false;
+const unsigned long VERBOSE_CONTROLLER_DEBUG_MS = 250;
+
 bool motorsArmed = false;
 bool emergencyAbort = false;
 
@@ -260,7 +302,8 @@ bool emergencyAbort = false;
 bool previousOptions = true;
 bool armButtonReleased = false;
 unsigned long lastControllerReport = 0;
-const unsigned long CONTROLLER_TIMEOUT_MS = 1000;
+const unsigned long CONTROLLER_TIMEOUT_MS = 2000;
+unsigned long lastVerboseControllerDebug = 0;
 bool previousL1 = false;
 bool previousR1 = false;
 
@@ -367,7 +410,6 @@ uint32_t lastControllerColor =
 // ======================================================================
 
 unsigned long lastStatusUpdate = 0;
-unsigned long lastSerialTelemetry = 0;
 
 
 // ======================================================================
@@ -382,6 +424,10 @@ const char* batteryStateName(BatteryState state);
 void batteryStateChanged(BatteryState newState);
 RGBColor getStatusColor(bool forController);
 void servicePairingSerial();
+void serviceControllerState();
+bool controllerInputsNeutral();
+const char* controllerStateName(ControllerState state);
+void printVerboseControllerDebug();
 
 
 // ======================================================================
@@ -1403,6 +1449,7 @@ void serviceMotorRamp() {
     bool driveAllowed =
         controller &&
         controller->isConnected() &&
+        controllerState == CONTROLLER_READY &&
         motorsArmed &&
         !emergencyAbort &&
         !wifiConfigActive;
@@ -1491,7 +1538,8 @@ void mixDrive(float throttle, float second, float& left, float& right) {
 }
 
 void processDrive() {
-    if (!controller || !controller->isConnected() || !motorsArmed ||
+    if (!controller || !controller->isConnected() ||
+        controllerState != CONTROLLER_READY || !motorsArmed ||
         emergencyAbort || wifiConfigActive) {
         requestedLeftMotor = requestedRightMotor = 0;
         return;
@@ -1761,10 +1809,19 @@ void batteryStateChanged(
             2
         ) {
 
+            bool wasArmed =
+                motorsArmed;
+
             motorsArmed =
                 false;
 
             stopMotorsImmediate();
+
+            if (wasArmed) {
+                Serial.println(
+                    "Drive state: DISARMED by critical battery protection."
+                );
+            }
         }
 
 
@@ -2143,6 +2200,48 @@ RGBColor getStatusColor(
                 100,
                 5,
                 150
+            );
+
+        return color;
+    }
+
+
+    // Controller connected but not yet safe to accept commands.
+
+    if (
+        controllerState ==
+        CONTROLLER_INITIALIZING
+    ) {
+
+        int phase =
+            (
+                millis() /
+                12
+            ) %
+            200;
+
+        if (phase > 100) {
+            phase =
+                200 -
+                phase;
+        }
+
+        color.r = 0;
+        color.g =
+            map(
+                phase,
+                0,
+                100,
+                15,
+                150
+            );
+        color.b =
+            map(
+                phase,
+                0,
+                100,
+                20,
+                220
             );
 
         return color;
@@ -2630,13 +2729,27 @@ void handleStatus() {
     json +=
         "\"controller\":\"";
 
-    json +=
-        (
-            controller &&
-            controller->isConnected()
-        )
-        ? "CONNECTED"
-        : "WAITING";
+    if (
+        !controller ||
+        !controller->isConnected()
+    ) {
+
+        json +=
+            "WAITING";
+
+    } else if (
+        controllerState ==
+        CONTROLLER_INITIALIZING
+    ) {
+
+        json +=
+            "INITIALIZING";
+
+    } else {
+
+        json +=
+            "READY";
+    }
 
     json +=
         "\",";
@@ -2678,6 +2791,14 @@ void handleStatus() {
 
         json +=
             "ABORTED";
+
+    } else if (
+        controllerState ==
+        CONTROLLER_INITIALIZING
+    ) {
+
+        json +=
+            "INITIALIZING";
 
     } else if (
         motorsArmed
@@ -3307,8 +3428,29 @@ void stopConfigWiFi() {
     stopMotorsImmediate();
 
 
+    // Require a fresh settle / neutral check before the vehicle can be
+    // armed again after configuration mode.
+    if (
+        controller &&
+        controller->isConnected()
+    ) {
+
+        controllerState =
+            CONTROLLER_INITIALIZING;
+
+        controllerConnectedAt =
+            millis();
+
+        controllerNeutralSince =
+            0;
+
+        controllerWaitingForNeutralLogged =
+            false;
+    }
+
+
     Serial.println(
-        "Configuration Wi-Fi OFF"
+        "Configuration Wi-Fi OFF - controller must revalidate neutral before READY."
     );
 
 
@@ -3385,10 +3527,228 @@ void serviceConfigWiFi() {
 // CHECK STICK CENTERING
 // ======================================================================
 
+const char* controllerStateName(
+    ControllerState state
+) {
+
+    switch (state) {
+
+        case CONTROLLER_INITIALIZING:
+            return "INITIALIZING";
+
+        case CONTROLLER_READY:
+            return "READY";
+
+        default:
+            return "DISCONNECTED";
+    }
+}
+
+
+bool controllerInputsNeutral() {
+
+    if (
+        !controller ||
+        !controller->isConnected()
+    ) {
+        return false;
+    }
+
+    return
+        abs(controller->axisX()) <= settings.stickDeadzone &&
+        abs(controller->axisY()) <= settings.stickDeadzone &&
+        abs(controller->axisRX()) <= settings.stickDeadzone &&
+        abs(controller->axisRY()) <= settings.stickDeadzone &&
+        controller->brake() <= CONTROLLER_TRIGGER_NEUTRAL_MAX &&
+        controller->throttle() <= CONTROLLER_TRIGGER_NEUTRAL_MAX;
+}
+
+
 bool sticksCentered() {
-    if (!controller || !controller->isConnected()) return false;
-    return abs(controller->axisY()) <= settings.stickDeadzone &&
-        abs(settings.driveMode == 1 ? controller->axisRX() : controller->axisRY()) <= settings.stickDeadzone;
+    return controllerInputsNeutral();
+}
+
+
+// ======================================================================
+// CONTROLLER STARTUP / RECONNECT STATE
+// ======================================================================
+
+void serviceControllerState() {
+
+    if (
+        !controller ||
+        !controller->isConnected()
+    ) {
+
+        controllerState =
+            CONTROLLER_DISCONNECTED;
+
+        controllerNeutralSince =
+            0;
+
+        controllerWaitingForNeutralLogged =
+            false;
+
+        return;
+    }
+
+
+    if (
+        controllerState !=
+        CONTROLLER_INITIALIZING
+    ) {
+        return;
+    }
+
+
+    // Do not accept a controller whose input stream has timed out.
+    if (
+        controllerTimeoutActive ||
+        millis() -
+        lastControllerReport >
+        CONTROLLER_TIMEOUT_MS
+    ) {
+        return;
+    }
+
+
+    unsigned long now =
+        millis();
+
+
+    if (
+        now -
+        controllerConnectedAt <
+        CONTROLLER_SETTLE_MS
+    ) {
+        return;
+    }
+
+
+    if (
+        !controllerInputsNeutral()
+    ) {
+
+        controllerNeutralSince =
+            0;
+
+        if (
+            !controllerWaitingForNeutralLogged
+        ) {
+
+            Serial.println(
+                "Controller initialized; waiting for sticks/triggers to return to neutral."
+            );
+
+            controllerWaitingForNeutralLogged =
+                true;
+        }
+
+        return;
+    }
+
+
+    if (
+        controllerNeutralSince ==
+        0
+    ) {
+
+        controllerNeutralSince =
+            now;
+
+        return;
+    }
+
+
+    if (
+        now -
+        controllerNeutralSince <
+        CONTROLLER_NEUTRAL_STABLE_MS
+    ) {
+        return;
+    }
+
+
+    // Establish fresh button-edge baselines after Bluetooth settles.
+    previousOptions =
+        controller->miscStart();
+
+    previousL1 =
+        controller->l1();
+
+    previousR1 =
+        controller->r1();
+
+    armButtonReleased =
+        !controller->miscStart() &&
+        !controller->y();
+
+    wifiComboActive =
+        false;
+
+    wifiComboTriggered =
+        false;
+
+    wifiComboStart =
+        0;
+
+
+    controllerState =
+        CONTROLLER_READY;
+
+    controllerWaitingForNeutralLogged =
+        false;
+
+
+    Serial.println(
+        "Controller READY - vehicle remains DISARMED."
+    );
+
+
+    queueRumble(
+        1,
+        120,
+        0,
+        45,
+        35
+    );
+
+
+    // If battery was already low before controller became ready,
+    // notify now.
+
+    if (
+        settings.batteryEnabled &&
+        batteryState ==
+        BATTERY_LOW &&
+        settings.batteryRumble
+    ) {
+
+        queueRumble(
+            2,
+            180,
+            150,
+            90,
+            60
+        );
+    }
+
+
+    if (
+        settings.batteryEnabled &&
+        batteryState ==
+        BATTERY_CRITICAL &&
+        settings.batteryRumble
+    ) {
+
+        queueRumble(
+            3,
+            230,
+            120,
+            180,
+            150
+        );
+    }
 }
 
 
@@ -3525,17 +3885,62 @@ void onConnectedController(
     if (
         controller != nullptr
     ) {
-
         return;
     }
 
 
-    if (!ctl->isGamepad()) return;
-    controller = ctl;
-    armButtonReleased = false;
-    previousOptions = true;
-    previousL1 = previousR1 = false;
-    lastControllerReport = millis();
+    if (!ctl->isGamepad()) {
+        return;
+    }
+
+
+    controller =
+        ctl;
+
+
+    // A Bluetooth connection is NOT permission to drive.  Enter an
+    // initialization state until reports are stable and every control
+    // input has returned to neutral.
+    controllerState =
+        CONTROLLER_INITIALIZING;
+
+    controllerConnectedAt =
+        millis();
+
+    controllerNeutralSince =
+        0;
+
+    controllerWaitingForNeutralLogged =
+        false;
+
+    controllerTimeoutActive =
+        false;
+
+    lastControllerReport =
+        millis();
+
+
+    armButtonReleased =
+        false;
+
+    previousOptions =
+        true;
+
+    previousL1 =
+        false;
+
+    previousR1 =
+        false;
+
+
+    wifiComboActive =
+        false;
+
+    wifiComboTriggered =
+        false;
+
+    wifiComboStart =
+        0;
 
 
     motorsArmed =
@@ -3544,60 +3949,18 @@ void onConnectedController(
     stopMotorsImmediate();
 
 
+    rumblePattern.active =
+        false;
+
+
     lastControllerColor =
         0xFFFFFFFF;
 
 
     Serial.println();
     Serial.println(
-        "DualSense connected."
+        "Controller connected - INITIALIZING; motors locked out."
     );
-
-
-    queueRumble(
-        1,
-        150,
-        0,
-        60,
-        40
-    );
-
-
-    // If battery was already low before
-    // controller connected, notify now.
-
-    if (
-        settings.batteryEnabled &&
-        batteryState ==
-        BATTERY_LOW &&
-        settings.batteryRumble
-    ) {
-
-        queueRumble(
-            2,
-            180,
-            150,
-            90,
-            60
-        );
-    }
-
-
-    if (
-        settings.batteryEnabled &&
-        batteryState ==
-        BATTERY_CRITICAL &&
-        settings.batteryRumble
-    ) {
-
-        queueRumble(
-            3,
-            230,
-            120,
-            180,
-            150
-        );
-    }
 }
 
 
@@ -3618,6 +3981,22 @@ void onDisconnectedController(
 
 
     controller = nullptr;
+
+    controllerState =
+        CONTROLLER_DISCONNECTED;
+
+    controllerConnectedAt =
+        0;
+
+    controllerNeutralSince =
+        0;
+
+    controllerWaitingForNeutralLogged =
+        false;
+
+    controllerTimeoutActive =
+        false;
+
     armButtonReleased = false;
     previousOptions = true;
     BP32.enableNewBluetoothConnections(true);
@@ -3642,7 +4021,7 @@ void onDisconnectedController(
 
 
     Serial.println(
-        "DualSense disconnected - motors stopped."
+        "Controller disconnected - motors stopped; vehicle DISARMED."
     );
 }
 
@@ -3653,7 +4032,10 @@ void onDisconnectedController(
 
 void processButtons() {
 
-    if (!controller) {
+    if (
+        !controller ||
+        controllerState != CONTROLLER_READY
+    ) {
         return;
     }
 
@@ -3719,6 +4101,10 @@ void processButtons() {
 
                     stopMotorsImmediate();
 
+                    Serial.println(
+                        "Drive state: ARMED"
+                    );
+
 
                     queueRumble(
                         1,
@@ -3729,6 +4115,10 @@ void processButtons() {
                     );
 
                 } else {
+
+                    Serial.println(
+                        "Arming blocked: sticks/triggers must be neutral."
+                    );
 
                     queueRumble(
                         2,
@@ -3741,10 +4131,19 @@ void processButtons() {
 
             } else {
 
+                bool wasArmed =
+                    motorsArmed;
+
                 motorsArmed =
                     false;
 
                 stopMotorsImmediate();
+
+                if (wasArmed) {
+                    Serial.println(
+                        "Drive state: DISARMED"
+                    );
+                }
             }
         }
     }
@@ -3769,6 +4168,10 @@ void processButtons() {
 
         lowSpeedProfile =
             true;
+
+        Serial.println(
+            "Speed profile: LOW"
+        );
     }
 
 
@@ -3791,6 +4194,10 @@ void processButtons() {
 
         lowSpeedProfile =
             false;
+
+        Serial.println(
+            "Speed profile: NORMAL"
+        );
     }
 
 
@@ -3800,53 +4207,58 @@ void processButtons() {
 
 
 // ======================================================================
-// SERIAL TELEMETRY
+// OPTIONAL VERBOSE CONTROLLER DEBUG
 // ======================================================================
+//
+// Normal USB Serial output is event-driven and prints only meaningful
+// state changes.  Set VERBOSE_CONTROLLER_DEBUG=true near the controller
+// globals when live input diagnostics are needed.
 
-void printTelemetry() {
+void printVerboseControllerDebug() {
 
     if (
-        millis() -
-        lastSerialTelemetry <
-        1000
+        !VERBOSE_CONTROLLER_DEBUG ||
+        !controller ||
+        !controller->isConnected()
     ) {
         return;
     }
 
 
-    lastSerialTelemetry =
+    unsigned long now =
         millis();
 
 
+    if (
+        now -
+        lastVerboseControllerDebug <
+        VERBOSE_CONTROLLER_DEBUG_MS
+    ) {
+        return;
+    }
+
+
+    lastVerboseControllerDebug =
+        now;
+
+
     Serial.printf(
-        "BT:%s ARM:%s WIFI:%s "
-        "L:%d R:%d "
-        "BAT:%.2f %s\n",
-
-        (
-            controller &&
-            controller->isConnected()
-        )
-            ? "OK"
-            : "WAIT",
-
+        "CTRL:%s LX:%d LY:%d RX:%d RY:%d L2:%d R2:%d BTN:0x%04X ARM:%s L:%d R:%d\n",
+        controllerStateName(
+            controllerState
+        ),
+        controller->axisX(),
+        controller->axisY(),
+        controller->axisRX(),
+        controller->axisRY(),
+        controller->brake(),
+        controller->throttle(),
+        controller->buttons(),
         motorsArmed
             ? "YES"
             : "NO",
-
-        wifiConfigActive
-            ? "ON"
-            : "OFF",
-
         leftMotorCommand,
-
-        rightMotorCommand,
-
-        batteryFilteredVoltage,
-
-        batteryStateName(
-            batteryState
-        )
+        rightMotorCommand
     );
 }
 
@@ -3966,7 +4378,11 @@ void setup() {
 
     Serial.println();
     Serial.println(
-        "Waiting for DualSense..."
+        "Waiting for controller..."
+    );
+
+    Serial.println(
+        "On connection: 1 second settle + neutral validation before READY."
     );
 
     Serial.println(
@@ -4012,15 +4428,92 @@ void loop() {
     // Bluepad32
     // --------------------------------------------------------------
 
-    bool dataUpdated = BP32.update();
-    if (dataUpdated && controller && controller->hasData()) lastControllerReport = millis();
-    // The Bluetooth stack may take seconds to report a lost radio link.
-    if (controller && millis() - lastControllerReport > CONTROLLER_TIMEOUT_MS) {
-        motorsArmed = false;
-        stopMotorsImmediate();
-        armButtonReleased = false;
-        previousOptions = true;
+    bool dataUpdated =
+        BP32.update();
+
+
+    if (
+        dataUpdated &&
+        controller &&
+        controller->hasData()
+    ) {
+
+        lastControllerReport =
+            millis();
+
+        if (
+            controllerTimeoutActive
+        ) {
+
+            controllerTimeoutActive =
+                false;
+
+            controllerState =
+                CONTROLLER_INITIALIZING;
+
+            controllerConnectedAt =
+                millis();
+
+            controllerNeutralSince =
+                0;
+
+            controllerWaitingForNeutralLogged =
+                false;
+
+            Serial.println(
+                "Controller reports resumed - reinitializing before control is allowed."
+            );
+        }
     }
+
+
+    // The Bluetooth stack can take time to announce a lost link.  Treat
+    // stale reports as a safety fault even if isConnected() is still true.
+    if (
+        controller &&
+        controller->isConnected() &&
+        millis() -
+        lastControllerReport >
+        CONTROLLER_TIMEOUT_MS
+    ) {
+
+        if (
+            !controllerTimeoutActive
+        ) {
+
+            controllerTimeoutActive =
+                true;
+
+            bool wasArmed =
+                motorsArmed;
+
+            motorsArmed =
+                false;
+
+            stopMotorsImmediate();
+
+            controllerState =
+                CONTROLLER_INITIALIZING;
+
+            controllerNeutralSince =
+                0;
+
+            armButtonReleased =
+                false;
+
+            previousOptions =
+                true;
+
+            Serial.println(
+                wasArmed
+                    ? "Controller data timeout - motors stopped; vehicle DISARMED."
+                    : "Controller data timeout - waiting for reports to resume."
+            );
+        }
+    }
+
+
+    serviceControllerState();
 
 
     // --------------------------------------------------------------
@@ -4038,6 +4531,8 @@ void loop() {
         controller &&
         controller->isConnected() &&
         controller->isGamepad() &&
+        controllerState == CONTROLLER_READY &&
+        !controllerTimeoutActive &&
         millis() - lastControllerReport <= CONTROLLER_TIMEOUT_MS
     ) {
 
@@ -4086,8 +4581,11 @@ void loop() {
     // --------------------------------------------------------------
     // USB diagnostics
     // --------------------------------------------------------------
+    //
+    // Normal output is event-driven.  This optional diagnostic stream
+    // is disabled by default.
 
-    printTelemetry();
+    printVerboseControllerDebug();
 
 
     delay(

@@ -6,7 +6,9 @@ The project uses an original-generation ESP32 with Bluetooth Classic support, a 
 
 The current firmware revision is:
 
-**Firmware Version: 0.5**
+**Firmware Version: 0.6.0**
+
+See [CHANGELOG.md](CHANGELOG.md) for revision history.
 
 ---
 
@@ -90,17 +92,19 @@ Pixels `1` and above are reserved for future vehicle lighting functions.
 
 | Function                     | ESP32 GPIO |
 | ---------------------------- | ---------: |
-| MDD3A Motor 1 A              |    GPIO 17 |
-| MDD3A Motor 1 B              |    GPIO 18 |
-| MDD3A Motor 2 A              |    GPIO 22 |
-| MDD3A Motor 2 B              |    GPIO 23 |
-| WS2811 / WS2812 Data         |    GPIO 25 |
-| Future Servo 1               |    GPIO 26 |
-| Future Servo 2               |    GPIO 27 |
+| MDD3A Motor 1 A              |    GPIO 25 |
+| MDD3A Motor 1 B              |    GPIO 26 |
+| MDD3A Motor 2 A              |    GPIO 27 |
+| MDD3A Motor 2 B              |    GPIO 14 |
+| WS2811 / WS2812 Data         |     GPIO 4 |
+| Future Servo 1               |    GPIO 32 |
+| Future Auxiliary Output      |    GPIO 33 |
 | Vehicle Battery ADC          |    GPIO 34 |
 | Emergency Abort / PRG Button |     GPIO 0 |
 
-For a final custom installation, GPIO 0 may be replaced with a normal GPIO such as GPIO 32 or GPIO 33 for the emergency input.
+Firmware 0.6.0 uses this WROOM mapping. Firmware 0.5 and earlier used GPIO 17/18/22/23 for the motors and GPIO 25 for the LEDs; rewire before flashing 0.6.0 onto an older build.
+
+For a final custom installation, GPIO 0 may be replaced with a spare general-purpose GPIO for the emergency input.
 
 ---
 
@@ -110,10 +114,10 @@ For a final custom installation, GPIO 0 may be replaced with a normal GPIO such 
 
 | ESP32   | MDD3A |
 | ------- | ----- |
-| GPIO 17 | M1A   |
-| GPIO 18 | M1B   |
-| GPIO 22 | M2A   |
-| GPIO 23 | M2B   |
+| GPIO 25 | M1A   |
+| GPIO 26 | M1B   |
+| GPIO 27 | M2A   |
+| GPIO 14 | M2B   |
 | GND     | GND   |
 
 The MDD3A `5Vo` output is not used to power the ESP32.
@@ -199,6 +203,17 @@ The firmware includes several motor safety behaviors.
 
 Motors always start in the **SAFE / DISARMED** state.
 
+## Controller Initialization
+
+A Bluetooth connection does not by itself allow driving. On every connect, reconnect, resumed report stream, or exit from configuration mode, the controller enters an **INITIALIZING** state:
+
+* a 1 second Bluetooth settle period
+* all sticks inside the deadband and both triggers released
+* neutral held steady for 250 ms
+* stale button-edge state cleared
+
+The controller then becomes **READY**, and the vehicle remains disarmed until an explicit OPTIONS press. The status pixel and lightbar pulse cyan while initializing.
+
 ## Controller Disconnect
 
 If the DualSense disconnects:
@@ -206,7 +221,7 @@ If the DualSense disconnects:
 * both motor commands immediately go to zero
 * the vehicle becomes disarmed
 * a controller reconnection does not automatically re-arm the vehicle
-* a one-second controller-data timeout also stops and disarms the vehicle if the radio stops delivering reports before the Bluetooth stack reports a disconnect
+* a two-second controller-data timeout also stops and disarms the vehicle if the radio stops delivering reports before the Bluetooth stack reports a disconnect; when reports resume, the controller must pass initialization again
 
 ## Configuration Mode
 
@@ -325,6 +340,7 @@ Current status behavior:
 | Color / Pattern | Meaning                                 |
 | --------------- | --------------------------------------- |
 | Blue pulse      | Waiting for controller                  |
+| Cyan pulse      | Controller initializing / waiting for neutral |
 | Solid blue      | Controller connected, motors safe       |
 | Green           | Motors armed                            |
 | Flashing yellow | Wi-Fi activation combination being held |
@@ -380,7 +396,7 @@ The same button combination can shut configuration mode down.
 
 Configuration mode can be entered at any time after boot while disarmed, with the active drive axes centered. Hold OPTIONS + Triangle for the configured duration (default 3 seconds). The former 60-second startup window has been removed, including its web field and NVS setting; an old saved window is ignored.
 
-Wi-Fi remains off at startup. Entry is rejected while armed or emergency-aborted. Serial output reports AP startup/failure, SSID, IP address, station count changes, inactivity shutdown, and manual shutdown. Firmware 0.5 uses SSID `ESPRC` and password `ESPRC123` in the actual AP configuration.
+Wi-Fi remains off at startup. Entry is rejected while armed or emergency-aborted. Serial output reports AP startup/failure, SSID, IP address, station count changes, inactivity shutdown, and manual shutdown. Firmware 0.6.0 uses SSID `ESPRC` and password `ESPRC123` in the actual AP configuration.
 
 ---
 
@@ -464,7 +480,7 @@ Pixel 0 remains reserved for system status.
 * Restore factory defaults
 * Shut down Wi-Fi
 
-All saved settings are retained in ESP32 NVS. Form values are rendered from current settings, including selected options and checkboxes. Invalid, missing, nonnumeric, nonfinite, or out-of-range numerical values reject the entire save; critical voltage must be lower than warning voltage. Corrupt saved settings restore safe defaults with battery monitoring and critical shutdown enabled. The legacy `gravedig` namespace is retained to migrate existing settings; new settings default to tank mode, proportional steering, 100% sensitivity, and 100% maximum output.
+All saved settings are retained in ESP32 NVS. Form values are rendered from current settings, including selected options and checkboxes. Invalid, missing, nonnumeric, nonfinite, or out-of-range numerical values reject the entire save; critical voltage must be lower than warning voltage. Corrupt saved settings restore safe defaults with battery monitoring and critical shutdown enabled. Settings are stored in the `gravedig` NVS namespace, the only namespace the firmware uses; the name is kept from earlier revisions so existing saved settings still load, and no migration from any other namespace is performed. New settings default to tank mode, proportional steering, 100% sensitivity, and 100% maximum output.
 
 ---
 
@@ -502,7 +518,7 @@ The divider ratio is approximately:
 
 This firmware configuration is for **2S LiPo only**. At full charge (8.4 V), the ADC receives approximately `8.4 × 33 / 133 = 2.084 V`. GPIO34 is an ADC1 input, so battery measurement remains available during Wi-Fi configuration.
 
-Version 0.5 changes the firmware divider constant from 150 kΩ / 33 kΩ to **100 kΩ / 33 kΩ**. Verify the physical divider matches before enabling monitoring; a board still fitted with 150 kΩ must be changed or use matching firmware constants. No other GPIO assignments change.
+Version 0.5 changed the firmware divider constant from 150 kΩ / 33 kΩ to **100 kΩ / 33 kΩ**. Verify the physical divider matches before enabling monitoring; a board still fitted with 150 kΩ must be changed or use matching firmware constants. The battery ADC remains on GPIO 34 in 0.6.0.
 
 ---
 
@@ -664,7 +680,7 @@ For PS5 DualSense support, use the Bluepad32-compatible ESP32 Arduino environmen
 
 # Bluetooth Pairing and Reconnection
 
-Bluepad32 stores Bluetooth link keys in ESP32 NVS. The v0.4 sketch already avoided clearing keys at startup; v0.5 preserves that behavior, explicitly enables connections/scanning at boot and after disconnect, and disables virtual mouse devices so the DualSense touchpad cannot occupy the gamepad slot.
+Bluepad32 stores Bluetooth link keys in ESP32 NVS. The v0.4 sketch already avoided clearing keys at startup; v0.5 and later preserve that behavior, explicitly enable connections/scanning at boot and after disconnect, and disable virtual mouse devices so the DualSense touchpad cannot occupy the gamepad slot.
 
 For initial pairing, hold **Create + PS** until the DualSense flashes rapidly. On later power cycles, power the ESP32 and press **PS** to wake the previously paired controller. Bluepad32 handles reconnecting with the saved keys; the controller cannot be woken by the ESP32 while powered off. Reconnection always leaves drive disarmed and requires released buttons, neutral sticks, and a new OPTIONS press.
 
@@ -705,8 +721,8 @@ All LED and ESP32 grounds must be connected.
 The current GPIO plan reserves:
 
 ```text
-GPIO 26 - Servo 1
-GPIO 27 - Servo 2
+GPIO 32 - Servo 1
+GPIO 33 - Auxiliary output
 ```
 
 Standard hobby RC servos do not require an external motor driver.
@@ -794,7 +810,7 @@ The software emergency stop is not a substitute for a physical battery disconnec
 # Current Default Configuration
 
 ```text
-Firmware:                  0.5
+Firmware:                  0.6.0
 Drive Mode:                Tank
 Steering Mode:             Proportional
 Steering Sensitivity:      100%
@@ -880,9 +896,13 @@ Battery systems, motors, motor drivers, wiring, and mechanical systems can produ
 
 
 
-## Building and validation (v0.5)
+## Serial diagnostics
 
-Use the **ESP32 + Bluepad32** board package for the original ESP32, not a BLE-only ESP32 variant. The repository previously did not pin a board-package version. Version 0.5 was compiled and linked against board package `esp32-bluepad32:esp32@4.1.0` (bundled Arduino ESP32 core 2.0.17), using Adafruit NeoPixel 1.15.5. The existing Arduino core 3.x PWM compatibility branch is retained but was not built in this validation.
+USB Serial (115200 baud) is event-driven: it prints boot information and meaningful state changes (controller connect / initializing / ready / disconnect, data timeout and resume, arm / disarm, blocked arming, speed profile, battery state, Wi-Fi on / off, pairing reset, settings saved, emergency abort). There is no once-per-second status line. For live stick and button diagnostics, set `VERBOSE_CONTROLLER_DEBUG` to `true` near the controller globals in the sketch.
+
+## Building and validation
+
+Use the **ESP32 + Bluepad32** board package for the original ESP32, not a BLE-only ESP32 variant. Version 0.5 was compiled and linked against board package `esp32-bluepad32:esp32@4.1.0` (bundled Arduino ESP32 core 2.0.17), using Adafruit NeoPixel 1.15.5; 0.6.0 targets the same toolchain. The existing Arduino core 3.x PWM compatibility branch is retained but has not been built.
 
 The sketch is kept at its existing repository path. For Arduino IDE/CLI, copy `Code/ESP32-RC-Tank-WebUI.ino` into a folder named `ESP32-RC-Tank-WebUI`, then select **ESP32 Dev Module** under the Bluepad32 board package. CLI example, with that package and NeoPixel installed:
 
@@ -890,7 +910,7 @@ The sketch is kept at its existing repository path. For Arduino IDE/CLI, copy `C
 arduino-cli compile --fqbn esp32-bluepad32:esp32:esp32 ESP32-RC-Tank-WebUI
 ```
 
-Host regression tests extract and execute the actual firmware functions with simulated I/O:
+Host regression tests (`tests/test_firmware.py`) were used during v0.5 development but are **not yet committed to this repository**, so the commands below cannot currently be run from a fresh clone. They extract and execute the actual firmware functions with simulated I/O:
 
 ```sh
 python tests/test_firmware.py --compiler g++
