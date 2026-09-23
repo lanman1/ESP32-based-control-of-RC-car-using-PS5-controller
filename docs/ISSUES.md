@@ -2,7 +2,7 @@
 
 Each entry becomes one GitHub issue once the GitHub CLI is available. Keep the ID in the issue title so CHANGELOG and branch names stay traceable. Line numbers refer to `Code/ESP32-RC-Tank-WebUI.ino` at 0.6.0.
 
-Sources: [HANDOFF.md](HANDOFF.md) (v0.5 review, re-checked against 0.6.0) and [HANDOFF2.md](HANDOFF2.md).
+Sources: the v0.5 code review (re-checked against 0.6.0) and follow-up web UI / Bluetooth notes. The original handoff documents were removed on 2026-09-23 and remain in git history.
 
 Status: `open`, `in progress (branch)`, `done (version)`.
 
@@ -27,7 +27,7 @@ Status: `open`, `in progress (branch)`, `done (version)`.
 | R9 | No controller e-stop | open |
 | R10 | Wi-Fi idle timeout never fires while the page is open | open |
 
-## Web UI and Bluetooth (HANDOFF2)
+## Web UI and Bluetooth
 
 | ID | Title | Status |
 |----|-------|--------|
