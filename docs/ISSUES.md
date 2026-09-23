@@ -40,7 +40,7 @@ Status: `open`, `in progress (branch)`, `done (version)`.
 
 | ID | Title | Status |
 |----|-------|--------|
-| D1 | README claims `gravedig` namespace is migrated | done (0.6.0 docs) |
+| D1 | README claims the settings namespace is migrated | done (namespace renamed to `esprc`) |
 | D2 | README references missing `tests/` | partly done (noted as missing); see T1 |
 | D3 | Critical recovery wording ambiguous | open (after R6) |
 | T1 | Commit `tests/test_firmware.py` if it exists locally | waiting on owner |

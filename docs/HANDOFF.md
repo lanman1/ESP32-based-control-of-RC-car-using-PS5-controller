@@ -37,7 +37,7 @@ Line numbers are approximate.
 
 ### README vs code mismatches
 
-- The README claims the legacy `gravedig` namespace is migrated, but it's just the only namespace used.
+- The README claims the legacy settings namespace is migrated, but it's just the only namespace used.
 - `tests/` is described but missing.
 - Critical recovery wording is ambiguous (crit + hyst vs low + hyst). Make it explicit after fixing item 6.
 

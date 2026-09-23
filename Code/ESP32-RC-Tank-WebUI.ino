@@ -186,6 +186,9 @@ unsigned long wifiShutdownRequestTime = 0;
 
 Preferences prefs;
 
+const char* SETTINGS_NAMESPACE =
+    "esprc";
+
 
 struct TankSettings {
 
@@ -555,7 +558,7 @@ void loadSettings() {
     setFactoryDefaults();
 
     prefs.begin(
-        "gravedig",
+        SETTINGS_NAMESPACE,
         true
     );
 
@@ -832,7 +835,7 @@ void loadSettings() {
 void saveSettings() {
 
     prefs.begin(
-        "gravedig",
+        SETTINGS_NAMESPACE,
         false
     );
 
