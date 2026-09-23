@@ -6,7 +6,7 @@ The project uses an original-generation ESP32 with Bluetooth Classic support, a 
 
 The current firmware revision is:
 
-**Firmware Version: 0.6.0**
+**Firmware Version: 0.7.0**
 
 See [CHANGELOG.md](CHANGELOG.md) for revision history.
 
@@ -102,7 +102,7 @@ Pixels `1` and above are reserved for future vehicle lighting functions.
 | Vehicle Battery ADC          |    GPIO 34 |
 | Emergency Abort / PRG Button |     GPIO 0 |
 
-Firmware 0.6.0 uses this WROOM mapping. Firmware 0.5 and earlier used GPIO 17/18/22/23 for the motors and GPIO 25 for the LEDs; rewire before flashing 0.6.0 onto an older build.
+Firmware 0.6.0 and later use this WROOM mapping. The web interface shows the same table (GPIO Map card), generated from the firmware's pin definitions. Firmware 0.5 and earlier used GPIO 17/18/22/23 for the motors and GPIO 25 for the LEDs; rewire before flashing 0.6.0 onto an older build.
 
 For a final custom installation, GPIO 0 may be replaced with a spare general-purpose GPIO for the emergency input.
 
@@ -178,12 +178,16 @@ All grounds must remain common.
 | Left Stick Y       | Tank: left track; arcade: both tracks throttle |
 | Right Stick Y      | Tank: right track forward / reverse |
 | Right Stick X      | Arcade: left / right steering |
-| OPTIONS            | Arm / disarm motors                   |
+| OPTIONS            | Arm (on release) / disarm (on press)  |
+| PS                 | E-stop: stop motors and disarm (never arms) |
 | L1                 | Low-speed profile                     |
 | R1                 | Normal-speed profile                  |
 | OPTIONS + Triangle | Enter / exit Wi-Fi configuration mode |
+| Create + PS        | Pairing mode                          |
 
-The vehicle cannot be armed unless all active drive axes are inside the configured deadband. After reconnecting or leaving configuration mode, release OPTIONS and Triangle before pressing OPTIONS to arm.
+Arming happens when OPTIONS is **released**, and only if Triangle was not pressed at any point during that press, so the OPTIONS + Triangle combination can never arm the vehicle, whichever button goes down first. Disarming happens as soon as OPTIONS is pressed. The vehicle cannot be armed unless all active drive axes are inside the configured deadband. After reconnecting or leaving configuration mode, release OPTIONS and Triangle before pressing OPTIONS to arm.
+
+A refused arm is reported by rumble and on Serial: **2 pulses** means the sticks or triggers are not neutral, **3 pulses** means battery protection, Wi-Fi configuration mode or an emergency abort is blocking drive.
 
 ### Drive modes
 
@@ -191,7 +195,7 @@ Tank mode is the default: left Y controls the left track, right Y controls the r
 
 Proportional steering scales steering by throttle magnitude, so a centered throttle cannot start a pivot. Pivot steering permits opposite track directions at zero throttle. Steering sensitivity is adjustable from 0–200%; the steering input is clamped before mixing. Inline SVG diagrams in the web UI explain both layouts without internet access.
 
-The mixer normalizes both outputs after trim, preserving their ratio and staying within the lower of the selected speed profile and maximum output setting. A critical-battery limit can reduce that cap further. Limits also clamp the current ramp output immediately when reduced. Existing acceleration/deceleration and motor reversal remain available.
+The mixer normalizes both outputs after trim, preserving their ratio and staying within the lower of the selected speed profile and maximum output setting. A critical-battery limit can reduce that cap further. When a limit is reduced (L1 or the critical limit), the output ramps down to the new cap at the deceleration rate instead of dropping instantly; disarm, disconnect and e-stop still stop immediately. Existing acceleration/deceleration and motor reversal remain available.
 
 ---
 
@@ -214,6 +218,8 @@ A Bluetooth connection does not by itself allow driving. On every connect, recon
 
 The controller then becomes **READY**, and the vehicle remains disarmed until an explicit OPTIONS press. The status pixel and lightbar pulse cyan while initializing.
 
+Only one controller is accepted at a time. A second controller that connects is disconnected, and new Bluetooth connections are disabled while a controller is active; they are re-enabled when it disconnects.
+
 ## Controller Disconnect
 
 If the DualSense disconnects:
@@ -221,6 +227,7 @@ If the DualSense disconnects:
 * both motor commands immediately go to zero
 * the vehicle becomes disarmed
 * a controller reconnection does not automatically re-arm the vehicle
+* if controller reports stop for **300 ms**, both motors stop at once but the vehicle stays armed; when reports resume, drive stays at zero until the sticks and triggers return to neutral
 * a two-second controller-data timeout also stops and disarms the vehicle if the radio stops delivering reports before the Bluetooth stack reports a disconnect; when reports resume, the controller must pass initialization again
 
 ## Configuration Mode
@@ -230,6 +237,10 @@ Entering Wi-Fi configuration mode automatically:
 * disarms the vehicle
 * stops both motors
 * prevents motor arming while configuration mode is active
+
+## Controller E-Stop
+
+Pressing **PS** while armed stops both motors immediately, disarms the vehicle and gives one long, strong rumble. It is stop-only: PS never arms. Re-arm with OPTIONS as usual. (While no controller is connected, PS wakes a paired DualSense as before.)
 
 ## Emergency Abort
 
@@ -339,17 +350,18 @@ Current status behavior:
 
 | Color / Pattern | Meaning                                 |
 | --------------- | --------------------------------------- |
-| Blue pulse      | Waiting for controller                  |
-| Cyan pulse      | Controller initializing / waiting for neutral |
-| Solid blue      | Controller connected, motors safe       |
-| Green           | Motors armed                            |
-| Flashing yellow | Wi-Fi activation combination being held |
-| Yellow          | Wi-Fi configuration active              |
-| Orange          | Low vehicle battery                     |
+| Fast flashing red | Emergency abort                       |
+| Flashing purple | Wi-Fi activation combination being held |
+| Purple          | Wi-Fi configuration active              |
+| Slow flashing red | Drive locked out by battery protection (critical latched, no reading, or not yet qualified) |
 | Red             | Critical vehicle battery                |
-| Flashing red    | Emergency abort                         |
+| Orange          | Low vehicle battery                     |
+| Blue pulse      | Waiting for controller (status LED only) |
+| Cyan pulse      | Controller initializing / waiting for neutral |
+| Green           | Motors armed                            |
+| Solid blue      | Controller connected, motors safe       |
 
-Battery warnings take priority over normal drive status.
+The table is in priority order: when more than one applies, the higher row wins. Wi-Fi states are shown above battery warnings so configuration mode is always visible. The DualSense lightbar uses the same colors; the pixel and lightbar battery warnings are enabled separately, the lightbar is off until a controller connects, and the brightness setting applies to the pixel only. The web interface includes the same legend.
 
 ---
 
@@ -384,7 +396,7 @@ Default behavior:
 2. Both joysticks must be centered.
 3. Hold `OPTIONS + Triangle`.
 4. Continue holding for 3 seconds.
-5. The status pixel / controller light flashes yellow during the hold.
+5. The status pixel / controller light flashes purple during the hold, then stays purple while configuration is active.
 6. The `ESPRC` Wi-Fi network starts.
 7. Motors remain disabled while Wi-Fi is active.
 
@@ -396,7 +408,9 @@ The same button combination can shut configuration mode down.
 
 Configuration mode can be entered at any time after boot while disarmed, with the active drive axes centered. Hold OPTIONS + Triangle for the configured duration (default 3 seconds). The former 60-second startup window has been removed, including its web field and NVS setting; an old saved window is ignored.
 
-Wi-Fi remains off at startup. Entry is rejected while armed or emergency-aborted. Serial output reports AP startup/failure, SSID, IP address, station count changes, inactivity shutdown, and manual shutdown. Firmware 0.6.0 uses SSID `ESPRC` and password `ESPRC123` in the actual AP configuration.
+Wi-Fi remains off at startup. Entry is rejected while armed or emergency-aborted. Serial output reports AP startup/failure, SSID, IP address, station count changes, inactivity shutdown, and manual shutdown. The firmware uses SSID `ESPRC` and password `ESPRC123` in the actual AP configuration.
+
+Leaving configuration mode (controller combination, web button or idle timeout) is staged: the request is recorded, then the web server stops, the access point disconnects, and the radio turns off, with a short pause between each step. Each step is logged on Serial, along with free heap at the request. This replaces the 0.6.0 back-to-back shutdown that could crash with `Stack canary watchpoint triggered (sys_evt)`.
 
 ---
 
@@ -408,9 +422,7 @@ Default:
 300 seconds
 ```
 
-The configuration page polls the ESP32 while it remains open.
-
-The idle timeout begins once browser activity stops.
+The idle timeout counts from the last user action on the configuration page: loading the page, saving, restoring defaults or clearing pairing. The page's live status polling does not count, so Wi-Fi times out even if the page is left open.
 
 Wi-Fi can also be shut down using:
 
@@ -465,6 +477,14 @@ Pixel 0 remains reserved for system status.
 * Idle timeout
 * OPTIONS + Triangle hold duration
 
+## Reference cards
+
+* Battery divider wiring diagram
+* Controller controls and Create + PS pairing diagram
+* OPTIONS + Triangle combination diagram
+* Status indicator color legend
+* GPIO map
+
 ## System
 
 * Current firmware version
@@ -475,12 +495,14 @@ Pixel 0 remains reserved for system status.
 * Motor output
 * Vehicle battery voltage
 * Vehicle battery state
+* Active protection (battery lockout, power limit, stale-data stop)
 * Wi-Fi client count
 * System uptime
+* Last reset reason
 * Restore factory defaults
 * Shut down Wi-Fi
 
-All saved settings are retained in ESP32 NVS. Form values are rendered from current settings, including selected options and checkboxes. Invalid, missing, nonnumeric, nonfinite, or out-of-range numerical values reject the entire save; critical voltage must be lower than warning voltage. Corrupt saved settings restore safe defaults with battery monitoring and critical shutdown enabled. Settings are stored in the `esprc` NVS namespace. Firmware 0.6.0 and earlier used a different namespace that is not migrated, so the first boot after updating from those versions starts from factory defaults; re-enter any customized settings. Bluetooth pairing is stored separately and is not affected. New settings default to tank mode, proportional steering, 100% sensitivity, and 100% maximum output.
+All saved settings are retained in ESP32 NVS. Form values are rendered from current settings, including selected options and checkboxes. Invalid, missing, nonnumeric, nonfinite, or out-of-range numerical values reject the entire save, and the error names the failing field or rule; critical voltage must be lower than warning voltage. Corrupt saved settings restore safe defaults with battery monitoring and critical shutdown enabled. Settings are stored in the `esprc` NVS namespace. Firmware 0.6.0 and earlier used a different namespace that is not migrated, so the first boot after updating from those versions starts from factory defaults; re-enter any customized settings. Bluetooth pairing is stored separately and is not affected. New settings default to tank mode, proportional steering, 100% sensitivity, and 100% maximum output.
 
 ---
 
@@ -524,7 +546,7 @@ Version 0.5 changed the firmware divider constant from 150 kΩ / 33 kΩ to **100
 
 # Battery Monitoring Behavior
 
-The firmware averages 12 calibrated ADC millivolt readings every 100 ms, applies the divider/calibration factor, then uses exponential filtering, hysteresis, and a configurable qualification time. Initial low/critical readings must qualify too. When monitoring is disabled, ADC-based warnings and protective actions are disabled and queued battery rumble is cancelled when the setting is saved. With critical shutdown selected, an unknown/unconnected battery reading also prevents arming.
+The firmware averages 12 calibrated ADC millivolt readings every 100 ms, applies the divider/calibration factor, then uses exponential filtering, hysteresis, and a configurable qualification time. Initial low/critical readings must qualify too. When monitoring is disabled, ADC-based warnings and protective actions are disabled and queued battery rumble is cancelled when the setting is saved. With critical shutdown selected, an unknown/unconnected battery reading also prevents arming. If monitoring is enabled but GPIO 34 reads under 0.5 V, Serial reports that no voltage is present, the web status shows "No reading on GPIO 34", and the status light flashes red slowly. Fit the divider or disable monitoring.
 
 These measures reduce false alarms caused by:
 
@@ -599,7 +621,7 @@ This is the recommended setting during initial testing.
 
 ## Limit Motor Power
 
-Maximum drive output is reduced to a configurable percentage.
+Maximum drive output is reduced to a configurable percentage. Once critical is confirmed, the limit stays in effect until the ESP32 is power-cycled.
 
 Default critical limit:
 
@@ -609,7 +631,7 @@ Default critical limit:
 
 ## Disable Drive
 
-The vehicle immediately becomes disarmed and cannot be rearmed until battery voltage recovers above the hysteresis threshold.
+The vehicle immediately becomes disarmed and **cannot be rearmed until the ESP32 is power-cycled**, normally after fitting a charged battery. A LiPo's resting voltage rebounds once the load is removed, so allowing recovery by voltage would let the pack be driven, sag and re-armed repeatedly toward over-discharge. The status light flashes red slowly while locked out. The displayed battery state may still move back to LOW or NORMAL; the lockout remains. Saving settings, changing the critical action, disabling monitoring or restoring defaults does not clear it either; only a power cycle does.
 
 ---
 
@@ -810,7 +832,7 @@ The software emergency stop is not a substitute for a physical battery disconnec
 # Current Default Configuration
 
 ```text
-Firmware:                  0.6.0
+Firmware:                  0.7.0
 Drive Mode:                Tank
 Steering Mode:             Proportional
 Steering Sensitivity:      100%
@@ -898,11 +920,11 @@ Battery systems, motors, motor drivers, wiring, and mechanical systems can produ
 
 ## Serial diagnostics
 
-USB Serial (115200 baud) is event-driven: it prints boot information and meaningful state changes (controller connect / initializing / ready / disconnect, data timeout and resume, arm / disarm, blocked arming, speed profile, battery state, Wi-Fi on / off, pairing reset, settings saved, emergency abort). There is no once-per-second status line. For live stick and button diagnostics, set `VERBOSE_CONTROLLER_DEBUG` to `true` near the controller globals in the sketch.
+USB Serial (115200 baud) is event-driven: it prints boot information, including the **reset reason** (power-on, crash, watchdog, brownout and so on), and meaningful state changes (controller connect / initializing / ready / disconnect, second controller rejected, stale-data stop, data timeout and resume, arm / disarm, blocked arming with the reason, PS e-stop, speed profile, battery state and lockout, Wi-Fi on, each Wi-Fi shutdown stage, pairing reset, settings saved, emergency abort). The reset reason also appears in the web Live status. There is no once-per-second status line. For live stick and button diagnostics, set `VERBOSE_CONTROLLER_DEBUG` to `true` near the controller globals in the sketch.
 
 ## Building and validation
 
-Use the **ESP32 + Bluepad32** board package for the original ESP32, not a BLE-only ESP32 variant. Version 0.5 was compiled and linked against board package `esp32-bluepad32:esp32@4.1.0` (bundled Arduino ESP32 core 2.0.17), using Adafruit NeoPixel 1.15.5; 0.6.0 targets the same toolchain. The existing Arduino core 3.x PWM compatibility branch is retained but has not been built.
+Use the **ESP32 + Bluepad32** board package for the original ESP32, not a BLE-only ESP32 variant. Version 0.5 was compiled and linked against board package `esp32-bluepad32:esp32@4.1.0` (bundled Arduino ESP32 core 2.0.17), using Adafruit NeoPixel 1.15.5; 0.7.0 was compiled against the same toolchain (about 93% of the default app partition). Motor PWM is 20 kHz, 8-bit. The existing Arduino core 3.x PWM compatibility branch is retained but has not been built.
 
 The sketch is kept at its existing repository path. For Arduino IDE/CLI, copy `Code/ESP32-RC-Tank-WebUI.ino` into a folder named `ESP32-RC-Tank-WebUI`, then select **ESP32 Dev Module** under the Bluepad32 board package. CLI example, with that package and NeoPixel installed:
 
