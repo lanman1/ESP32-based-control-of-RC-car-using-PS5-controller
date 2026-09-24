@@ -1,16 +1,21 @@
 /*
  ======================================================================
  ESP RC TANK CONTROLLER
- Firmware 0.6.0 - Controller startup state / event-driven diagnostics
+ Firmware 0.7.0 - Safety, Wi-Fi shutdown and web UI update
 
- Revision 0.6.0:
-   - Controller connection now enters INITIALIZING before READY.
-   - 1 second Bluetooth settle + neutral/stable-input validation.
-   - Reconnect and Wi-Fi exit never auto-arm the vehicle.
-   - USB Serial is event-driven by default; no 1 Hz status spam.
-   - Optional VERBOSE_CONTROLLER_DEBUG for live control diagnostics.
-   - Retains v0.5 drive modes, web UI graphics, persistent settings,
-     battery monitoring, Wi-Fi behavior, and WROOM GPIO mapping.
+ Revision 0.7.0:
+   - OPTIONS arms on release; Triangle during the press cancels (R1).
+   - Denied arming rumbles and logs the reason (R3).
+   - PS button is a stop-only controller e-stop (R9).
+   - Motors stop 300 ms after controller data stops (S1).
+   - Only one controller at a time; extras are disconnected (R2).
+   - Critical battery lockout latches until power cycle (R6).
+   - Staged, deferred Wi-Fi shutdown for every exit path (H3).
+   - Wi-Fi status is purple and shown above battery warnings (R5).
+   - Reset reason shown on Serial and in the web UI (S2).
+   - Speed-limit drops follow the deceleration ramp (R8).
+   - 20 kHz motor PWM (M2).
+   - Web UI: wiring, pairing and combo diagrams; color legend; GPIO map.
 
  ESP32-WROOM-32 / ESP32-WROOM-32E
  Cytron MDD3A
@@ -47,7 +52,8 @@
  RIGHT STICK Y   Tank: right track
  RIGHT STICK X   Arcade: steering
 
- OPTIONS         Arm / Disarm
+ OPTIONS         Arm (on release) / Disarm (on press)
+ PS              E-stop: disarm immediately (stop only)
 
  L1              Low-speed profile
  R1              Normal-speed profile
@@ -55,6 +61,8 @@
  OPTIONS +
  TRIANGLE
  held 3 seconds  Toggle configuration Wi-Fi
+
+ CREATE + PS     Pairing mode (hold until the light flashes rapidly)
 
  ----------------------------------------------------------------------
  WI-FI
@@ -65,20 +73,19 @@
  Address:    http://192.168.4.1
 
  ----------------------------------------------------------------------
- STATUS COLORS
+ STATUS COLORS (highest priority first)
  ----------------------------------------------------------------------
 
- Blue pulse      Waiting for controller
- Cyan pulse      Controller initializing / waiting for neutral
- Blue            Connected / SAFE
- Green           Motors ARMED
- Yellow          Configuration Wi-Fi
- Flash yellow    Wi-Fi activation hold in progress
- Orange          LOW vehicle battery
- Red             CRITICAL vehicle battery
- Flash red       Emergency abort
-
- Battery status overrides normal operating colors.
+ Flash red        Emergency abort (power-cycle to clear)
+ Flash purple     Wi-Fi activation hold in progress
+ Purple           Configuration Wi-Fi active
+ Slow flash red   Drive locked out by battery protection
+ Red              CRITICAL vehicle battery
+ Orange           LOW vehicle battery
+ Blue pulse       Waiting for controller (status LED only)
+ Cyan pulse       Controller initializing / waiting for neutral
+ Green            Motors ARMED
+ Blue             Connected / SAFE
 
  ======================================================================
 */
@@ -93,6 +100,7 @@
 #include <Adafruit_NeoPixel.h>
 
 #include <esp_arduino_version.h>
+#include <esp_system.h>
 
 #include <math.h>
 
@@ -101,7 +109,7 @@
 // VERSION
 // ======================================================================
 
-#define FIRMWARE_VERSION "0.6.0"
+#define FIRMWARE_VERSION "0.7.0"
 
 
 // ======================================================================
@@ -150,7 +158,8 @@ const float BAT_DIVIDER_RATIO =
 // MOTOR PWM
 // ======================================================================
 
-#define PWM_FREQ 10000
+// 20 kHz is above hearing and within the MDD3A limit (M2).
+#define PWM_FREQ 20000
 #define PWM_RESOLUTION 8
 #define PWM_FULL 255
 
@@ -174,10 +183,22 @@ const char* AP_PASSWORD =
 WebServer server(80);
 
 bool wifiConfigActive = false;
-bool wifiShutdownRequested = false;
 
 unsigned long wifiLastActivity = 0;
-unsigned long wifiShutdownRequestTime = 0;
+
+// Staged Wi-Fi shutdown (H3). Every exit path only requests shutdown;
+// loop() then performs one step at a time with a pause between steps.
+enum WiFiShutdownState {
+    WIFI_SHUTDOWN_NONE,
+    WIFI_SHUTDOWN_PENDING,
+    WIFI_SHUTDOWN_DISCONNECT_AP,
+    WIFI_SHUTDOWN_DISABLE_RADIO
+};
+
+WiFiShutdownState wifiShutdownState = WIFI_SHUTDOWN_NONE;
+unsigned long wifiShutdownStageStart = 0;
+unsigned long wifiShutdownStageDelay = 0;
+const unsigned long WIFI_SHUTDOWN_STAGE_MS = 150;
 
 
 // ======================================================================
@@ -308,6 +329,15 @@ bool optionsPressValid = false;      // R1: OPTIONS press eligible to arm on rel
 bool triangleDuringOptions = false;  // R1: Triangle seen during the current OPTIONS press
 unsigned long lastControllerReport = 0;
 const unsigned long CONTROLLER_TIMEOUT_MS = 2000;
+
+// S1: stop the motors (without disarming) when reports go quiet for this
+// long. After reports resume, drive stays at zero until the sticks and
+// triggers return to neutral.
+const unsigned long CONTROLLER_STALE_STOP_MS = 300;
+bool controllerStaleStop = false;
+bool driveNeedsNeutral = false;
+
+bool previousPS = true;   // R9: PS button edge
 unsigned long lastVerboseControllerDebug = 0;
 bool previousL1 = false;
 bool previousR1 = false;
@@ -370,6 +400,15 @@ unsigned long lastBatterySample = 0;
 
 unsigned long lastBatteryReminder = 0;
 
+// R6: once CRITICAL is confirmed, the critical action in force at that
+// moment (1 = limit power, 2 = disable drive) stays until power cycle.
+// It is kept separately so saving settings or restoring defaults from
+// the web page cannot clear it. 0 = not latched.
+int batteryLatchedBehavior = 0;
+
+// R7: monitoring is enabled but GPIO 34 reads almost nothing.
+bool batteryNoReading = false;
+
 
 // ======================================================================
 // RUMBLE SCHEDULER
@@ -403,6 +442,10 @@ struct RGBColor {
 };
 
 
+// Web UI controller diagram variants (declared early for Arduino's
+// generated prototypes).
+enum ControllerDiagram { CTRL_MAP, CTRL_PAIR, CTRL_COMBO, CTRL_TANK, CTRL_ARCADE };
+
 uint32_t lastPixelColor =
     0xFFFFFFFF;
 
@@ -415,6 +458,9 @@ uint32_t lastControllerColor =
 // ======================================================================
 
 unsigned long lastStatusUpdate = 0;
+
+// S2: why the ESP32 last restarted.
+const char* resetReasonText = "unknown";
 
 
 // ======================================================================
@@ -528,31 +574,37 @@ void setFactoryDefaults() {
 // LOAD SETTINGS
 // ======================================================================
 
+// Returns nullptr when valid, otherwise a description of the first
+// failing rule (M5).
+const char* settingsProblem(const TankSettings& v) {
+    if (!(v.lowSpeedPercent >= 5 && v.lowSpeedPercent <= 100)) return "Low-speed limit must be 5-100%";
+    if (!(v.normalSpeedPercent >= 5 && v.normalSpeedPercent <= 100)) return "Normal-speed limit must be 5-100%";
+    if (!(v.driveMode >= 0 && v.driveMode <= 1)) return "Invalid drive mode";
+    if (!(v.steeringMode >= 0 && v.steeringMode <= 1)) return "Invalid steering behavior";
+    if (!(v.steeringSensitivity >= 0 && v.steeringSensitivity <= 200)) return "Steering sensitivity must be 0-200%";
+    if (!(v.maxOutputPercent >= 5 && v.maxOutputPercent <= 100)) return "Maximum motor output must be 5-100%";
+    if (!(v.stickDeadzone >= 0 && v.stickDeadzone <= 200)) return "Joystick deadband must be 0-200";
+    if (!(v.responseCurve >= 0 && v.responseCurve <= 3)) return "Invalid response curve";
+    if (!(v.accelerationMs >= 0 && v.accelerationMs <= 5000)) return "Acceleration must be 0-5000 ms";
+    if (!(v.decelerationMs >= 0 && v.decelerationMs <= 5000)) return "Deceleration must be 0-5000 ms";
+    if (!(v.leftTrimPercent >= 50 && v.leftTrimPercent <= 120)) return "Left trim must be 50-120%";
+    if (!(v.rightTrimPercent >= 50 && v.rightTrimPercent <= 120)) return "Right trim must be 50-120%";
+    if (!(v.pixelBrightness >= 1 && v.pixelBrightness <= 255)) return "Pixel brightness must be 1-255";
+    if (!(isfinite(v.lowBatteryVoltage) && v.lowBatteryVoltage >= 6.0 && v.lowBatteryVoltage <= 8.4)) return "Warning voltage must be 6.0-8.4 V";
+    if (!(isfinite(v.criticalBatteryVoltage) && v.criticalBatteryVoltage >= 6.0 && v.criticalBatteryVoltage <= 8.3)) return "Critical voltage must be 6.0-8.3 V";
+    if (!(isfinite(v.batteryHysteresis) && v.batteryHysteresis >= 0.01 && v.batteryHysteresis <= 0.5)) return "Recovery hysteresis must be 0.01-0.5 V";
+    if (!(isfinite(v.batteryCalibration) && v.batteryCalibration >= 0.5 && v.batteryCalibration <= 1.5)) return "ADC calibration must be 0.5-1.5";
+    if (!(v.batteryConfirmSeconds >= 1 && v.batteryConfirmSeconds <= 15)) return "Threshold confirmation must be 1-15 s";
+    if (!(v.criticalBehavior >= 0 && v.criticalBehavior <= 2)) return "Invalid critical battery action";
+    if (!(v.criticalPowerLimitPercent >= 10 && v.criticalPowerLimitPercent <= 100)) return "Critical power limit must be 10-100%";
+    if (!(v.wifiTimeoutSeconds >= 30 && v.wifiTimeoutSeconds <= 3600)) return "Wi-Fi timeout must be 30-3600 s";
+    if (!(v.wifiHoldSeconds >= 2 && v.wifiHoldSeconds <= 10)) return "OPTIONS + Triangle hold must be 2-10 s";
+    if (!(v.criticalBatteryVoltage < v.lowBatteryVoltage)) return "Critical voltage must be below warning voltage";
+    return nullptr;
+}
+
 bool validSettings(const TankSettings& v) {
-    return
-        v.lowSpeedPercent >= 5 && v.lowSpeedPercent <= 100 &&
-        v.normalSpeedPercent >= 5 && v.normalSpeedPercent <= 100 &&
-        v.driveMode >= 0 && v.driveMode <= 1 &&
-        v.steeringMode >= 0 && v.steeringMode <= 1 &&
-        v.steeringSensitivity >= 0 && v.steeringSensitivity <= 200 &&
-        v.maxOutputPercent >= 5 && v.maxOutputPercent <= 100 &&
-        v.stickDeadzone >= 0 && v.stickDeadzone <= 200 &&
-        v.responseCurve >= 0 && v.responseCurve <= 3 &&
-        v.accelerationMs >= 0 && v.accelerationMs <= 5000 &&
-        v.decelerationMs >= 0 && v.decelerationMs <= 5000 &&
-        v.leftTrimPercent >= 50 && v.leftTrimPercent <= 120 &&
-        v.rightTrimPercent >= 50 && v.rightTrimPercent <= 120 &&
-        v.pixelBrightness >= 1 && v.pixelBrightness <= 255 &&
-        isfinite(v.lowBatteryVoltage) && v.lowBatteryVoltage >= 6.0 && v.lowBatteryVoltage <= 8.4 &&
-        isfinite(v.criticalBatteryVoltage) && v.criticalBatteryVoltage >= 6.0 && v.criticalBatteryVoltage <= 8.3 &&
-        isfinite(v.batteryHysteresis) && v.batteryHysteresis >= 0.01 && v.batteryHysteresis <= 0.5 &&
-        isfinite(v.batteryCalibration) && v.batteryCalibration >= 0.5 && v.batteryCalibration <= 1.5 &&
-        v.batteryConfirmSeconds >= 1 && v.batteryConfirmSeconds <= 15 &&
-        v.criticalBehavior >= 0 && v.criticalBehavior <= 2 &&
-        v.criticalPowerLimitPercent >= 10 && v.criticalPowerLimitPercent <= 100 &&
-        v.wifiTimeoutSeconds >= 30 && v.wifiTimeoutSeconds <= 3600 &&
-        v.wifiHoldSeconds >= 2 && v.wifiHoldSeconds <= 10 &&
-        v.criticalBatteryVoltage < v.lowBatteryVoltage;
+    return settingsProblem(v) == nullptr;
 }
 
 void loadSettings() {
@@ -721,7 +773,8 @@ void loadSettings() {
     prefs.end();
 
     if (!validSettings(settings)) {
-        Serial.println("Invalid saved settings: restoring safe defaults, battery protection enabled.");
+        Serial.printf("Invalid saved settings (%s): restoring safe defaults, battery protection enabled.\n", settingsProblem(settings));
+        Serial.println("If no battery divider is fitted, disable voltage monitoring in the web UI.");
         setFactoryDefaults();
         settings.batteryEnabled = true;
         settings.criticalBehavior = 2;
@@ -1241,6 +1294,40 @@ void stopMotorsImmediate() {
 
 
 // ======================================================================
+// BATTERY PROTECTION (R6 / R7)
+// ======================================================================
+
+// True when Disable Drive currently forbids driving.
+bool batteryDriveLockout() {
+    if (batteryLatchedBehavior == 2) return true;
+    return
+        settings.batteryEnabled &&
+        settings.criticalBehavior == 2 &&
+        (
+            batteryState == BATTERY_CRITICAL ||
+            batteryState == BATTERY_UNKNOWN
+        );
+}
+
+// Human-readable reason for batteryDriveLockout().
+const char* batteryLockoutReason() {
+    if (batteryLatchedBehavior == 2) return "critical battery (latched until power cycle)";
+    if (batteryState == BATTERY_CRITICAL) return "critical battery";
+    if (batteryNoReading) return "no battery voltage on GPIO 34 (check divider or disable monitoring)";
+    return "battery reading not qualified yet";
+}
+
+// True when Limit Motor Power currently applies.
+bool batteryPowerLimited() {
+    if (batteryLatchedBehavior == 1) return true;
+    return
+        settings.batteryEnabled &&
+        settings.criticalBehavior == 1 &&
+        batteryState == BATTERY_CRITICAL;
+}
+
+
+// ======================================================================
 // CURRENT SPEED LIMIT
 // ======================================================================
 
@@ -1253,26 +1340,10 @@ int selectedSpeedPercent() {
 
 
 int effectiveSpeedPercent() {
-
-    int percent =
-        min(selectedSpeedPercent(), settings.maxOutputPercent);
-
-
-    if (
-        settings.batteryEnabled &&
-        batteryState ==
-            BATTERY_CRITICAL &&
-        settings.criticalBehavior == 1
-    ) {
-
-        percent =
-            min(
-                percent,
-                settings.criticalPowerLimitPercent
-            );
+    int percent = min(selectedSpeedPercent(), settings.maxOutputPercent);
+    if (batteryPowerLimited()) {
+        percent = min(percent, settings.criticalPowerLimitPercent);
     }
-
-
     return percent;
 }
 
@@ -1427,29 +1498,19 @@ float rampToward(
 
 void serviceMotorRamp() {
 
-    unsigned long now =
-        millis();
-
-
-    unsigned long dt =
-        now -
-        lastRampUpdate;
-
+    unsigned long now = millis();
+    unsigned long dt = now - lastRampUpdate;
 
     if (dt < 10) {
         return;
     }
 
-
-    lastRampUpdate =
-        now;
-
+    lastRampUpdate = now;
 
     // Avoid giant step after debugging pause.
     if (dt > 50) {
         dt = 50;
     }
-
 
     bool driveAllowed =
         controller &&
@@ -1459,62 +1520,35 @@ void serviceMotorRamp() {
         !emergencyAbort &&
         !wifiConfigActive;
 
-
-    if (
-        settings.batteryEnabled &&
-        (batteryState == BATTERY_CRITICAL || batteryState == BATTERY_UNKNOWN) &&
-        settings.criticalBehavior == 2
-    ) {
+    if (batteryDriveLockout()) {
         driveAllowed = false;
+        if (motorsArmed) {
+            Serial.printf("Drive state: DISARMED - %s.\n", batteryLockoutReason());
+        }
         motorsArmed = false;
     }
 
-
     if (!driveAllowed) {
-
         stopMotorsImmediate();
-
         return;
     }
 
+    // requested*Motor is already limited to the current speed cap by
+    // processDrive(). When the cap drops (L1, critical power limit), the
+    // applied output ramps down at the deceleration rate instead of being
+    // clamped instantly (R8). Disarm, disconnect and e-stop remain instant
+    // because they call stopMotorsImmediate().
+    appliedLeftMotor = rampToward( appliedLeftMotor, requestedLeftMotor, dt );
+    appliedRightMotor = rampToward( appliedRightMotor, requestedRightMotor, dt );
 
-    appliedLeftMotor =
-        rampToward(
-            appliedLeftMotor,
-            requestedLeftMotor,
-            dt
-        );
+    appliedLeftMotor = constrain(appliedLeftMotor, -255.0f, 255.0f);
+    appliedRightMotor = constrain(appliedRightMotor, -255.0f, 255.0f);
 
+    leftMotorCommand = round( appliedLeftMotor );
+    rightMotorCommand = round( appliedRightMotor );
 
-    appliedRightMotor =
-        rampToward(
-            appliedRightMotor,
-            requestedRightMotor,
-            dt
-        );
-
-
-    int limit = round(effectiveSpeedPercent() * 2.55f);
-    appliedLeftMotor = constrain(appliedLeftMotor, -float(limit), float(limit));
-    appliedRightMotor = constrain(appliedRightMotor, -float(limit), float(limit));
-    leftMotorCommand =
-        round(
-            appliedLeftMotor
-        );
-
-    rightMotorCommand =
-        round(
-            appliedRightMotor
-        );
-
-
-    setMotor1(
-        leftMotorCommand
-    );
-
-    setMotor2(
-        rightMotorCommand
-    );
+    setMotor1( leftMotorCommand );
+    setMotor2( rightMotorCommand );
 }
 
 
@@ -1543,15 +1577,26 @@ void mixDrive(float throttle, float second, float& left, float& right) {
 }
 
 void processDrive() {
-    if (!controller || !controller->isConnected() ||
-        controllerState != CONTROLLER_READY || !motorsArmed ||
-        emergencyAbort || wifiConfigActive) {
+    if (!controller || !controller->isConnected() || controllerState != CONTROLLER_READY ||
+        !motorsArmed || emergencyAbort || wifiConfigActive) {
         requestedLeftMotor = requestedRightMotor = 0;
         return;
     }
+
+    // S1: after a stale-data stop, hold zero output until the driver
+    // returns every control to neutral, so the vehicle cannot lurch.
+    if (driveNeedsNeutral) {
+        requestedLeftMotor = requestedRightMotor = 0;
+        if (controllerInputsNeutral()) {
+            driveNeedsNeutral = false;
+            Serial.println("Controls neutral - drive resumed.");
+        }
+        return;
+    }
+
     float throttle = normalizedStick(-controller->axisY());
-    float second = normalizedStick(settings.driveMode == 1 ?
-        controller->axisRX() : -controller->axisRY());
+    float second = normalizedStick(settings.driveMode == 1 ? controller->axisRX() : -controller->axisRY());
+
     float left, right;
     mixDrive(throttle, second, left, right);
     int limit = round(effectiveSpeedPercent() * 2.55f);
@@ -1618,9 +1663,9 @@ void serviceRumble() {
         millis();
 
 
+    // Wrap-safe comparison (M4).
     if (
-        now <
-        rumblePattern.nextPulse
+        (long)(now - rumblePattern.nextPulse) < 0
     ) {
         return;
     }
@@ -1761,91 +1806,47 @@ BatteryState determineBatteryState(
 // BATTERY STATE CHANGE
 // ======================================================================
 
-void batteryStateChanged(
-    BatteryState newState
-) {
+void batteryStateChanged( BatteryState newState ) {
 
-    batteryState =
-        newState;
+    batteryState = newState;
 
+    Serial.print( "Battery state: " );
+    Serial.println( batteryStateName( newState ) );
 
-    Serial.print(
-        "Battery state: "
-    );
+    if ( newState == BATTERY_LOW ) {
+        if ( settings.batteryRumble ) {
+            queueRumble( 2, 180, 150, 90, 60 );
+        }
+        lastBatteryReminder = millis();
+    }
 
-    Serial.println(
-        batteryStateName(
-            newState
-        )
-    );
+    if ( newState == BATTERY_CRITICAL ) {
 
-
-    if (
-        newState ==
-        BATTERY_LOW
-    ) {
-
-        if (
-            settings.batteryRumble
-        ) {
-
-            queueRumble(
-                2,
-                180,
-                150,
-                90,
-                60
+        // R6: resting voltage rebounds after the load is removed, so a
+        // critical lockout must not clear by itself. It stays until the
+        // ESP32 is power-cycled (normally with a charged battery).
+        if ( settings.criticalBehavior > batteryLatchedBehavior ) {
+            batteryLatchedBehavior = settings.criticalBehavior;
+            Serial.println(
+                settings.criticalBehavior == 2
+                    ? "Critical battery: drive DISABLED until power cycle."
+                    : "Critical battery: motor power LIMITED until power cycle."
             );
         }
 
-
-        lastBatteryReminder =
-            millis();
-    }
-
-
-    if (
-        newState ==
-        BATTERY_CRITICAL
-    ) {
-
-        if (
-            settings.criticalBehavior ==
-            2
-        ) {
-
-            bool wasArmed =
-                motorsArmed;
-
-            motorsArmed =
-                false;
-
+        if ( settings.criticalBehavior == 2 ) {
+            bool wasArmed = motorsArmed;
+            motorsArmed = false;
             stopMotorsImmediate();
-
             if (wasArmed) {
-                Serial.println(
-                    "Drive state: DISARMED by critical battery protection."
-                );
+                Serial.println( "Drive state: DISARMED by critical battery protection." );
             }
         }
 
-
-        if (
-            settings.batteryRumble
-        ) {
-
-            queueRumble(
-                3,
-                230,
-                120,
-                180,
-                150
-            );
+        if ( settings.batteryRumble ) {
+            queueRumble( 3, 230, 120, 180, 150 );
         }
-
-
-        lastBatteryReminder =
-            millis();
+        lastBatteryReminder = millis();
     }
 }
 
@@ -1856,12 +1857,10 @@ void batteryStateChanged(
 
 void serviceBatteryMonitor() {
 
-    if (
-        !settings.batteryEnabled
-    ) {
+    if ( !settings.batteryEnabled ) {
 
-        batteryState =
-            BATTERY_UNKNOWN;
+        batteryNoReading = false;
+        batteryState = BATTERY_UNKNOWN;
 
         batteryFilterInitialized = false;
         batteryCandidate = BATTERY_UNKNOWN;
@@ -1923,8 +1922,17 @@ void serviceBatteryMonitor() {
         settings.batteryCalibration;
 
 
-    // Treat very low voltage as "not connected".
-    if (measured < 0.50f) {
+    // Treat very low voltage as "not connected" (R7: say so once).
+    // Hysteresis: under 0.5 V sets "no reading"; it clears above 0.8 V.
+    if (measured < 0.50f || (batteryNoReading && measured < 0.80f)) {
+
+        if (!batteryNoReading) {
+            batteryNoReading = true;
+            Serial.println("Battery monitoring: no voltage on GPIO 34 (< 0.5 V). Check the divider wiring, or disable monitoring if no divider is fitted.");
+            if (settings.criticalBehavior == 2) {
+                Serial.println("Arming is blocked while Disable Drive has no battery reading.");
+            }
+        }
 
         batteryState =
             BATTERY_UNKNOWN;
@@ -1937,8 +1945,12 @@ void serviceBatteryMonitor() {
     }
 
 
-    batteryVoltage =
-        measured;
+    if (batteryNoReading) {
+        batteryNoReading = false;
+        Serial.println("Battery monitoring: voltage reading restored.");
+    }
+
+    batteryVoltage = measured;
 
 
     // Exponential filtering
@@ -2073,206 +2085,81 @@ void serviceBatteryMonitor() {
 // STATUS COLOR
 // ======================================================================
 
-RGBColor getStatusColor(
-    bool allowBatteryWarning
-) {
+// Priority order must match makeStatusLegendHtml() (U2).
+RGBColor getStatusColor( bool allowBatteryWarning ) {
 
-    RGBColor color;
+    RGBColor color = {0, 0, 0};
+    unsigned long now = millis();
 
-
-    // Emergency
+    // Emergency abort: fast red flash.
     if (emergencyAbort) {
-
-        bool on =
-            (
-                millis() /
-                200
-            ) %
-            2;
-
-        color.r =
-            on ? 255 : 0;
-
-        color.g = 0;
-        color.b = 0;
-
+        bool on = ( now / 200 ) % 2;
+        color.r = on ? 255 : 0;
         return color;
     }
 
+    // Wi-Fi states come before battery warnings (R5) so the driver can
+    // always see that configuration mode is holding or active.
+    // Purple is used so it cannot be confused with low-battery orange.
+    if ( wifiComboActive && !wifiComboTriggered ) {
+        bool on = ( now / 180 ) % 2;
+        color.r = on ? 150 : 20;
+        color.b = on ? 255 : 40;
+        return color;
+    }
+
+    if ( wifiConfigActive ) {
+        color.r = 150;
+        color.b = 255;
+        return color;
+    }
+
+    // Battery protection is stopping the vehicle: slow red flash.
+    // Always shown, because it explains why the vehicle will not arm.
+    if ( batteryDriveLockout() ) {
+        bool on = ( now / 500 ) % 2;
+        color.r = on ? 255 : 0;
+        return color;
+    }
 
     // Battery warnings
-
-    if (
-        allowBatteryWarning &&
-        settings.batteryEnabled
-    ) {
-
-        if (
-            batteryState ==
-            BATTERY_CRITICAL
-        ) {
-
+    if ( allowBatteryWarning && settings.batteryEnabled ) {
+        if ( batteryState == BATTERY_CRITICAL ) {
             color.r = 255;
-            color.g = 0;
-            color.b = 0;
-
             return color;
         }
-
-
-        if (
-            batteryState ==
-            BATTERY_LOW
-        ) {
-
+        if ( batteryState == BATTERY_LOW ) {
             color.r = 255;
             color.g = 75;
-            color.b = 0;
-
             return color;
         }
     }
 
-
-    // Wi-Fi combo hold
-
-    if (
-        wifiComboActive &&
-        !wifiComboTriggered
-    ) {
-
-        bool on =
-            (
-                millis() /
-                180
-            ) %
-            2;
-
-        color.r =
-            on ? 255 : 30;
-
-        color.g =
-            on ? 140 : 10;
-
-        color.b = 0;
-
-        return color;
-    }
-
-
-    // Wi-Fi active
-
-    if (
-        wifiConfigActive
-    ) {
-
-        color.r = 255;
-        color.g = 150;
-        color.b = 0;
-
-        return color;
-    }
-
-
     // Waiting for controller
-
-    if (
-        !controller ||
-        !controller->isConnected()
-    ) {
-
-        int phase =
-            (
-                millis() /
-                15
-            ) %
-            200;
-
-        if (phase > 100) {
-            phase =
-                200 -
-                phase;
-        }
-
-
-        color.r = 0;
-        color.g = 0;
-
-        color.b =
-            map(
-                phase,
-                0,
-                100,
-                5,
-                150
-            );
-
+    if ( !controller || !controller->isConnected() ) {
+        int phase = ( now / 15 ) % 200;
+        if (phase > 100) phase = 200 - phase;
+        color.b = map( phase, 0, 100, 5, 150 );
         return color;
     }
-
 
     // Controller connected but not yet safe to accept commands.
-
-    if (
-        controllerState ==
-        CONTROLLER_INITIALIZING
-    ) {
-
-        int phase =
-            (
-                millis() /
-                12
-            ) %
-            200;
-
-        if (phase > 100) {
-            phase =
-                200 -
-                phase;
-        }
-
-        color.r = 0;
-        color.g =
-            map(
-                phase,
-                0,
-                100,
-                15,
-                150
-            );
-        color.b =
-            map(
-                phase,
-                0,
-                100,
-                20,
-                220
-            );
-
+    if ( controllerState == CONTROLLER_INITIALIZING ) {
+        int phase = ( now / 12 ) % 200;
+        if (phase > 100) phase = 200 - phase;
+        color.g = map( phase, 0, 100, 15, 150 );
+        color.b = map( phase, 0, 100, 20, 220 );
         return color;
     }
-
 
     // Armed
-
-    if (
-        motorsArmed
-    ) {
-
-        color.r = 0;
+    if ( motorsArmed ) {
         color.g = 200;
-        color.b = 0;
-
         return color;
     }
 
-
     // Safe
-
-    color.r = 0;
-    color.g = 0;
     color.b = 180;
-
     return color;
 }
 
@@ -2422,30 +2309,21 @@ void emergencyStop() {
 
 void checkAbortButton() {
 
+    // Non-blocking 20 ms debounce (M3).
+    static unsigned long lowSince = 0;
+
     if (emergencyAbort) {
         return;
     }
 
-
-    if (
-        digitalRead(
-            ABORT_BUTTON
-        ) ==
-        LOW
-    ) {
-
-        delay(20);
-
-
-        if (
-            digitalRead(
-                ABORT_BUTTON
-            ) ==
-            LOW
-        ) {
-
+    if ( digitalRead( ABORT_BUTTON ) == LOW ) {
+        if (lowSince == 0) {
+            lowSince = millis() | 1;   // never 0 while held
+        } else if ( millis() - lowSince >= 20 ) {
             emergencyStop();
         }
+    } else {
+        lowSince = 0;
     }
 }
 
@@ -2555,23 +2433,23 @@ void noteWebActivity() {
 
 // Reference card: status colors (U2).
 // Keep this list in the same order and colors as getStatusColor().
-// If R5 changes the precedence or colors, update this card too.
 String makeStatusLegendHtml() {
     String h;
-    h.reserve(2200);
+    h.reserve(2600);
     h += R"HTML(<section class="card"><h2>Status Indicator Colors</h2>
 <p>Shown on the status pixel (LED 0) and the DualSense lightbar. When more than one applies, the one higher in this list wins.</p>
 <table><tr><th>Color</th><th>Meaning</th></tr>
-<tr><td><span class="sw blink" style="background:#ff0000"></span>Flashing red</td><td>Emergency abort (PRG button). Power-cycle to clear.</td></tr>
+<tr><td><span class="sw blink" style="background:#ff0000"></span>Fast flashing red</td><td>Emergency abort (PRG button). Power-cycle to clear.</td></tr>
+<tr><td><span class="sw blink" style="background:#9600ff"></span>Flashing purple</td><td>OPTIONS + Triangle being held</td></tr>
+<tr><td><span class="sw" style="background:#9600ff"></span>Purple</td><td>Wi-Fi configuration active (motors disabled)</td></tr>
+<tr><td><span class="sw slow" style="background:#ff0000"></span>Slow flashing red</td><td>Drive locked out by battery protection: critical battery (until power cycle), no voltage reading, or reading not qualified yet</td></tr>
 <tr><td><span class="sw" style="background:#ff0000"></span>Red</td><td>Critical vehicle battery</td></tr>
 <tr><td><span class="sw" style="background:#ff4b00"></span>Orange</td><td>Low vehicle battery</td></tr>
-<tr><td><span class="sw blink" style="background:#ff8c00"></span>Flashing yellow</td><td>OPTIONS + Triangle being held</td></tr>
-<tr><td><span class="sw" style="background:#ff9600"></span>Yellow</td><td>Wi-Fi configuration active (motors disabled)</td></tr>
 <tr><td><span class="sw pulse" style="background:#0000ff"></span>Blue pulse</td><td>Waiting for controller (status LED only; the lightbar is off until a controller connects)</td></tr>
 <tr><td><span class="sw pulse" style="background:#0096dc"></span>Cyan pulse</td><td>Controller initializing: center sticks and release triggers</td></tr>
 <tr><td><span class="sw" style="background:#00c800"></span>Green</td><td>Motors armed</td></tr>
 <tr><td><span class="sw" style="background:#0000b4"></span>Solid blue</td><td>Controller ready, motors disarmed</td></tr>
-</table><p>Battery colors appear only when battery monitoring and the matching warning option (status LED or controller light) are enabled, so the two can differ. The LED brightness setting affects the status LED only.</p></section>)HTML";
+</table><p class="note">Red and orange appear only when battery monitoring and the matching warning option (status LED or controller light) are enabled, so the two can differ. The slow red flash always shows. The LED brightness setting affects the status LED only.</p></section>)HTML";
     return h;
 }
 
@@ -2610,21 +2488,98 @@ String makeGpioMapHtml() {
 }
 
 
+// H1: 2S LiPo voltage divider wiring (inline, offline).
+String makeBatteryWiringSvg() {
+    return R"SVG(<svg viewBox="0 0 360 200" role="img" aria-label="Battery divider: battery positive through R1 100 kilohm to the ADC sense node on GPIO 34; R2 33 kilohm and an optional 100 nanofarad capacitor from the sense node to ground; battery negative to ESP32 ground">
+<g fill="none" stroke="#c5e88a" stroke-width="2.5"><path d="M55 40V30h65M180 30h90M220 30v30M220 110v60M220 45h-50v50M170 101v69M55 160v10h215"/></g>
+<g fill="#324958" stroke="#c5e88a" stroke-width="2"><rect x="20" y="40" width="70" height="120" rx="6"/><rect x="120" y="22" width="60" height="16" rx="3"/><rect x="212" y="60" width="16" height="50" rx="3"/><rect x="270" y="15" width="80" height="30" rx="5"/><rect x="270" y="155" width="80" height="30" rx="5"/></g>
+<g stroke="#c5e88a" stroke-width="3"><path d="M156 95h28M156 101h28"/></g>
+<g fill="#c5e88a"><circle cx="220" cy="30" r="4"/><circle cx="220" cy="45" r="3"/><circle cx="220" cy="170" r="3"/><circle cx="170" cy="170" r="3"/></g>
+<g fill="#eee" font-family="Arial" font-size="11" text-anchor="middle"><text x="55" y="92">2S LiPo</text><text x="55" y="108">8.4 V max</text><text x="46" y="55">+</text><text x="46" y="154">&#8722;</text><text x="150" y="15">R1 100 k&#937;</text><text x="310" y="34">GPIO 34</text><text x="310" y="174">ESP32 GND</text><text x="224" y="22">sense</text><text x="150" y="196">common ground</text></g>
+<g fill="#eee" font-family="Arial" font-size="11"><text x="234" y="82">R2</text><text x="234" y="96">33 k&#937;</text><text x="150" y="122" text-anchor="end">100 nF</text><text x="150" y="136" text-anchor="end">optional</text></g>
+</svg>)SVG";
+}
+
+
+// H2 / U1 / drive modes: controller diagrams in the filled style.
+// Shared parts of the controller diagrams (generic gamepad, not a
+// product likeness). Layout matches the DualSense button positions.
+static const char CTRL_SVG_COMMON[] = R"SVG(<defs><linearGradient id="cbd" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5a6875"/><stop offset=".55" stop-color="#3b4651"/><stop offset="1" stop-color="#262e36"/></linearGradient><linearGradient id="ctp" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4a5763"/><stop offset="1" stop-color="#2f3942"/></linearGradient><radialGradient id="cbt" cx=".4" cy=".35" r=".7"><stop offset="0" stop-color="#6b7885"/><stop offset="1" stop-color="#2a323a"/></radialGradient><radialGradient id="chl" cx=".4" cy=".35" r=".7"><stop offset="0" stop-color="#f1ffd9"/><stop offset="1" stop-color="#8fbf4a"/></radialGradient><radialGradient id="cst" cx=".45" cy=".4" r=".6"><stop offset="0" stop-color="#3a444e"/><stop offset=".8" stop-color="#1b2127"/><stop offset="1" stop-color="#11161b"/></radialGradient><filter id="cgl" x="-1" y="-1" width="3" height="3"><feGaussianBlur stdDeviation="3"/></filter><filter id="csh" x="-.1" y="-.1" width="1.2" height="1.3"><feDropShadow dy="4" stdDeviation="4" flood-opacity=".5"/></filter><marker id="car" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#c5e88a"/></marker></defs><g fill="url(#cbt)" stroke="#11161b"><rect x="64" y="22" width="44" height="16" rx="6"/><rect x="252" y="22" width="44" height="16" rx="6"/></g><path filter="url(#csh)" fill="url(#cbd)" stroke="#1a2026" stroke-width="1.5" d="M78 34C110 24 250 24 282 34C318 44 334 80 340 124C346 166 344 204 328 211C314 217 302 202 294 184C284 162 268 150 248 150H112C92 150 76 162 66 184C58 202 46 217 32 211C16 204 14 166 20 124C26 80 42 44 78 34Z"/><path fill="none" stroke="#7d8b98" stroke-opacity=".45" stroke-width="1.5" d="M80 38C112 29 248 29 280 38"/><rect x="122" y="32" width="116" height="62" rx="9" fill="url(#ctp)" stroke="#1a2026"/><path d="M62 80h14v-14h14v14h14v14h-14v14h-14v-14h-14z" fill="url(#cbt)" stroke="#11161b"/><g fill="url(#cst)" stroke="#0d1115" stroke-width="1.5"><circle cx="130" cy="128" r="19"/><circle cx="230" cy="128" r="19"/></g><g fill="none" stroke="#4d5963"><circle cx="130" cy="128" r="11"/><circle cx="230" cy="128" r="11"/></g>)SVG";
+
+String makeControllerSvg( ControllerDiagram mode ) {
+    String h;
+    h.reserve(4200);
+    // The button map needs room for side labels; the others are cropped
+    // to the controller so they display larger on a phone.
+    h += mode == CTRL_MAP
+        ? "<svg viewBox=\"0 0 420 250\" role=\"img\" aria-label=\""
+        : "<svg viewBox=\"34 2 352 244\" role=\"img\" aria-label=\"";
+    switch (mode) {
+        case CTRL_MAP: h += "Controller button map: L1, Create, OPTIONS, R1, Triangle, PS, left stick and right stick"; break;
+        case CTRL_PAIR: h += "Pairing: hold Create, left of the touchpad, and PS, between the sticks"; break;
+        case CTRL_COMBO: h += "Configuration mode: hold OPTIONS, right of the touchpad, and Triangle, the top face button"; break;
+        case CTRL_TANK: h += "Tank drive: left stick up and down drives the left track; right stick up and down drives the right track"; break;
+        case CTRL_ARCADE: h += "Arcade drive: left stick up and down is throttle for both tracks; right stick left and right steers"; break;
+    }
+    h += "\"><g transform=\"translate(30 16)\">";
+    h += CTRL_SVG_COMMON;
+    switch (mode) {
+        case CTRL_MAP:
+            h += R"SVG(<g stroke="#11161b"><rect x="103" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><rect x="249" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><circle cx="180" cy="126" r="9" fill="url(#cbt)"/><circle cx="279" cy="62" r="9.5" fill="url(#cbt)"/><circle cx="301" cy="84" r="9.5" fill="url(#cbt)"/><circle cx="279" cy="106" r="9.5" fill="url(#cbt)"/><circle cx="257" cy="84" r="9.5" fill="url(#cbt)"/></g><text x="180" y="129.5" font-family="Arial" font-size="8" font-weight="bold" text-anchor="middle" fill="#aab5bf">PS</text><g fill="none" stroke-width="1.6" stroke="#c9d2da"><path d="M279 57l-5 8.5h10z" stroke="#c9d2da"/><circle cx="301" cy="84" r="4.5"/><path d="M275 102l8 8m0-8l-8 8"/><rect x="253" y="80" width="8" height="8"/></g><g stroke="#c5e88a" stroke-width="1.5" fill="none"><path d="M72 26L46 14M104 46H46M288 26l30-12M253 42l-13-30M288 58l42-14M180 136v42M130 147l-26 53M230 147l26 53"/></g><g fill="#eee" font-family="Arial" font-weight="bold" font-size="13"><text x="42" y="18" text-anchor="end">L1</text><text x="42" y="50" text-anchor="end">Create</text><text x="322" y="18">R1</text><text x="236" y="9" text-anchor="middle">OPTIONS</text><text x="334" y="48">Triangle</text><text x="180" y="194" text-anchor="middle">PS</text><text x="100" y="214" text-anchor="middle">Left stick</text><text x="260" y="214" text-anchor="middle">Right stick</text></g></g></svg>)SVG";
+            break;
+        case CTRL_PAIR:
+            h += R"SVG(<circle cx="107" cy="50" r="12" fill="#c5e88a" opacity=".55" filter="url(#cgl)"/><circle cx="180" cy="126" r="12" fill="#c5e88a" opacity=".55" filter="url(#cgl)"/><g stroke="#11161b"><rect x="103" y="42" width="8" height="16" rx="4" fill="url(#chl)"/><rect x="249" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><circle cx="180" cy="126" r="9" fill="url(#chl)"/><circle cx="279" cy="62" r="9.5" fill="url(#cbt)"/><circle cx="301" cy="84" r="9.5" fill="url(#cbt)"/><circle cx="279" cy="106" r="9.5" fill="url(#cbt)"/><circle cx="257" cy="84" r="9.5" fill="url(#cbt)"/></g><text x="180" y="129.5" font-family="Arial" font-size="8" font-weight="bold" text-anchor="middle" fill="#1c2a10">PS</text><g fill="none" stroke-width="1.6" stroke="#c9d2da"><path d="M279 57l-5 8.5h10z" stroke="#c9d2da"/><circle cx="301" cy="84" r="4.5"/><path d="M275 102l8 8m0-8l-8 8"/><rect x="253" y="80" width="8" height="8"/></g><g stroke="#c5e88a" stroke-width="1.5" fill="none"><path d="M104 42L84 16M180 136v44"/></g><g fill="#eee" font-family="Arial" font-weight="bold" font-size="15"><text x="80" y="14" text-anchor="end">Create</text><text x="180" y="196" text-anchor="middle">PS</text></g></g></svg>)SVG";
+            break;
+        case CTRL_COMBO:
+            h += R"SVG(<circle cx="253" cy="50" r="12" fill="#c5e88a" opacity=".55" filter="url(#cgl)"/><circle cx="279" cy="62" r="12" fill="#c5e88a" opacity=".55" filter="url(#cgl)"/><g stroke="#11161b"><rect x="103" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><rect x="249" y="42" width="8" height="16" rx="4" fill="url(#chl)"/><circle cx="180" cy="126" r="9" fill="url(#cbt)"/><circle cx="279" cy="62" r="9.5" fill="url(#chl)"/><circle cx="301" cy="84" r="9.5" fill="url(#cbt)"/><circle cx="279" cy="106" r="9.5" fill="url(#cbt)"/><circle cx="257" cy="84" r="9.5" fill="url(#cbt)"/></g><text x="180" y="129.5" font-family="Arial" font-size="8" font-weight="bold" text-anchor="middle" fill="#aab5bf">PS</text><g fill="none" stroke-width="1.6" stroke="#c9d2da"><path d="M279 57l-5 8.5h10z" stroke="#1c2a10"/><circle cx="301" cy="84" r="4.5"/><path d="M275 102l8 8m0-8l-8 8"/><rect x="253" y="80" width="8" height="8"/></g><g stroke="#c5e88a" stroke-width="1.5" fill="none"><path d="M253 42l-6-26M288 60l30-40"/></g><g fill="#eee" font-family="Arial" font-weight="bold" font-size="15"><text x="247" y="13" text-anchor="middle">OPTIONS</text><text x="318" y="15" text-anchor="middle">Triangle</text></g></g></svg>)SVG";
+            break;
+        case CTRL_TANK:
+            h += R"SVG(<g stroke="#11161b"><rect x="103" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><rect x="249" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><circle cx="180" cy="126" r="9" fill="url(#cbt)"/><circle cx="279" cy="62" r="9.5" fill="url(#cbt)"/><circle cx="301" cy="84" r="9.5" fill="url(#cbt)"/><circle cx="279" cy="106" r="9.5" fill="url(#cbt)"/><circle cx="257" cy="84" r="9.5" fill="url(#cbt)"/></g><text x="180" y="129.5" font-family="Arial" font-size="8" font-weight="bold" text-anchor="middle" fill="#aab5bf">PS</text><g fill="none" stroke-width="1.6" stroke="#c9d2da"><path d="M279 57l-5 8.5h10z" stroke="#c9d2da"/><circle cx="301" cy="84" r="4.5"/><path d="M275 102l8 8m0-8l-8 8"/><rect x="253" y="80" width="8" height="8"/></g><circle cx="130" cy="128" r="16" fill="#c5e88a" opacity=".35" filter="url(#cgl)"/><circle cx="230" cy="128" r="16" fill="#c5e88a" opacity=".35" filter="url(#cgl)"/><path d="M130 106v44" stroke="#c5e88a" stroke-width="3.5" fill="none" marker-start="url(#car)" marker-end="url(#car)"/><path d="M230 106v44" stroke="#c5e88a" stroke-width="3.5" fill="none" marker-start="url(#car)" marker-end="url(#car)"/><g fill="#eee" font-family="Arial" font-weight="bold" font-size="16" text-anchor="middle"><text x="130" y="190">Left track</text><text x="230" y="190">Right track</text></g><g fill="#b8c6d1" font-family="Arial" font-size="13" text-anchor="middle"><text x="130" y="207">fwd / rev</text><text x="230" y="207">fwd / rev</text></g></g></svg>)SVG";
+            break;
+        case CTRL_ARCADE:
+            h += R"SVG(<g stroke="#11161b"><rect x="103" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><rect x="249" y="42" width="8" height="16" rx="4" fill="url(#cbt)"/><circle cx="180" cy="126" r="9" fill="url(#cbt)"/><circle cx="279" cy="62" r="9.5" fill="url(#cbt)"/><circle cx="301" cy="84" r="9.5" fill="url(#cbt)"/><circle cx="279" cy="106" r="9.5" fill="url(#cbt)"/><circle cx="257" cy="84" r="9.5" fill="url(#cbt)"/></g><text x="180" y="129.5" font-family="Arial" font-size="8" font-weight="bold" text-anchor="middle" fill="#aab5bf">PS</text><g fill="none" stroke-width="1.6" stroke="#c9d2da"><path d="M279 57l-5 8.5h10z" stroke="#c9d2da"/><circle cx="301" cy="84" r="4.5"/><path d="M275 102l8 8m0-8l-8 8"/><rect x="253" y="80" width="8" height="8"/></g><circle cx="130" cy="128" r="16" fill="#c5e88a" opacity=".35" filter="url(#cgl)"/><circle cx="230" cy="128" r="16" fill="#c5e88a" opacity=".35" filter="url(#cgl)"/><path d="M130 106v44" stroke="#c5e88a" stroke-width="3.5" fill="none" marker-start="url(#car)" marker-end="url(#car)"/><path d="M208 128h44" stroke="#c5e88a" stroke-width="3.5" fill="none" marker-start="url(#car)" marker-end="url(#car)"/><g fill="#eee" font-family="Arial" font-weight="bold" font-size="16" text-anchor="middle"><text x="130" y="190">Throttle</text><text x="230" y="190">Steering</text></g><g fill="#b8c6d1" font-family="Arial" font-size="13" text-anchor="middle"><text x="130" y="207">both tracks</text><text x="230" y="207">left / right</text></g></g></svg>)SVG";
+            break;
+    }
+    return h;
+}
+
+
+// Controller reference card: controls, pairing (H2).
+String makeControllerCardHtml() {
+    String h;
+    h.reserve(3600);
+    h += R"HTML(<section class="card"><h2>Controller</h2>)HTML";
+    h += makeControllerSvg(CTRL_MAP);
+    h += R"HTML(<table><tr><th>Control</th><th>Action</th></tr>
+<tr><td>OPTIONS</td><td>Arm when released (sticks neutral). Disarm when pressed.</td></tr>
+<tr><td>PS</td><td>E-stop: stops the motors and disarms at once. Never arms.</td></tr>
+<tr><td>L1 / R1</td><td>Low / normal speed profile</td></tr>
+<tr><td>OPTIONS + Triangle</td><td>Hold to enter or leave Wi-Fi configuration (disarmed)</td></tr>
+<tr><td>Create + PS</td><td>Pairing mode</td></tr>
+</table>
+<p class="note">Denied arming rumbles: 2 pulses = controls not neutral, 3 pulses = battery lockout, Wi-Fi mode or abort. The PS e-stop gives one long rumble.</p>
+<h3>Pairing a DualSense</h3>)HTML";
+    h += makeControllerSvg(CTRL_PAIR);
+    h += R"HTML(<p><b>Hold Create + PS until the controller light flashes rapidly.</b> Create is the small button on the left of the touchpad. OPTIONS, on the right, is not the pairing button. Once paired, press PS to reconnect.</p></section>)HTML";
+    return h;
+}
+
+
 String makeWebPage() {
     String html;
     html.reserve(15000);
     html += R"HTML(<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>ESPRC</title>
-<style>body{font-family:Arial,sans-serif;background:#101820;color:#eee;margin:0}main{max-width:780px;margin:auto;padding:20px}.card{background:#202d37;padding:20px;border-radius:12px;margin:16px 0}label{display:block;margin:14px 0}input,select,button{font:inherit;padding:9px;border-radius:5px}input:not([type=checkbox]),select{display:block;box-sizing:border-box;width:100%;margin-top:5px}button{cursor:pointer;background:#c5e88a;color:#182119;border:0}svg{width:100%;height:auto}p{line-height:1.5}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:600px){.grid{grid-template-columns:1fr}}#status{white-space:pre-line;line-height:1.6}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:7px 6px;border-bottom:1px solid #34444f;vertical-align:middle}th{color:#9fb3c0;font-weight:normal}.sw{display:inline-block;width:16px;height:16px;border-radius:50%;margin-right:8px;vertical-align:middle;box-shadow:0 0 0 1px #0006}.blink{animation:blink .4s steps(1) infinite}.pulse{animation:pulse 3s ease-in-out infinite}@keyframes blink{50%{opacity:.12}}@keyframes pulse{50%{opacity:.2}}@media(prefers-reduced-motion:reduce){.blink,.pulse{animation:none}}</style>
+<style>body{font-family:Arial,sans-serif;background:#101820;color:#eee;margin:0}main{max-width:780px;margin:auto;padding:20px}.card{background:#202d37;padding:20px;border-radius:12px;margin:16px 0}label{display:block;margin:14px 0}input,select,button{font:inherit;padding:9px;border-radius:5px}input:not([type=checkbox]),select{display:block;box-sizing:border-box;width:100%;margin-top:5px}button{cursor:pointer;background:#c5e88a;color:#182119;border:0}svg{width:100%;height:auto}p{line-height:1.5}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:600px){.grid{grid-template-columns:1fr}}#status{white-space:pre-line;line-height:1.6}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:7px 6px;border-bottom:1px solid #34444f;vertical-align:middle}th{color:#9fb3c0;font-weight:normal}.sw{display:inline-block;width:16px;height:16px;border-radius:50%;margin-right:8px;vertical-align:middle;box-shadow:0 0 0 1px #0006}.blink{animation:blink .4s steps(1) infinite}.slow{animation:blink 1s steps(1) infinite}.pulse{animation:pulse 3s ease-in-out infinite}@keyframes blink{50%{opacity:.12}}@keyframes pulse{50%{opacity:.2}}@media(prefers-reduced-motion:reduce){.blink,.slow,.pulse{animation:none}}.note{color:#9fb3c0;font-size:.92em}</style>
 </head><body><main><h1>ESPRC</h1><p>Firmware )HTML";
     html += FIRMWARE_VERSION;
     html += R"HTML(</p><section class="card"><h2>Live status</h2><div id="status">Connecting...</div></section>
 <form method="post" action="/save"><section class="card"><h2>Drive Configuration</h2>
-<div class="grid"><div><h3>Tank drive</h3>
-<svg viewBox="0 0 300 145" role="img" aria-label="Tank drive: left stick Y controls left track; right stick Y controls right track">
-<g fill="#324958" stroke="#c5e88a" stroke-width="3"><circle cx="75" cy="62" r="35"/><circle cx="225" cy="62" r="35"/><path d="M75 16v92m-9-82 9-10 9 10m-18 72 9 10 9-10M225 16v92m-9-82 9-10 9 10m-18 72 9 10 9-10" fill="none"/></g><g fill="white" font-size="12" text-anchor="middle"><text x="75" y="126">Left Track</text><text x="225" y="126">Right Track</text><text x="75" y="141">Forward / Reverse</text><text x="225" y="141">Forward / Reverse</text></g></svg></div>
-<div><h3>Arcade drive</h3><svg viewBox="0 0 300 145" role="img" aria-label="Arcade drive: left stick Y is throttle for both tracks; right stick X steers left and right">
-<g fill="#324958" stroke="#c5e88a" stroke-width="3"><circle cx="75" cy="62" r="35"/><circle cx="225" cy="62" r="35"/><path d="M75 16v92m-9-82 9-10 9 10m-18 72 9 10 9-10M179 62h92m-82-9-10 9 10 9m72-18 10 9-10 9" fill="none"/></g><g fill="white" font-size="12" text-anchor="middle"><text x="75" y="126">Both Tracks</text><text x="75" y="141">Forward / Reverse</text><text x="225" y="126">Right Stick</text><text x="225" y="141">Left / Right Steering</text></g></svg></div></div>
+<div class="grid"><div><h3>Tank drive</h3>)HTML";
+    html += makeControllerSvg(CTRL_TANK);
+    html += R"HTML(</div><div><h3>Arcade drive</h3>)HTML";
+    html += makeControllerSvg(CTRL_ARCADE);
+    html += R"HTML(</div></div>
 <p>Arcade: left stick Y controls throttle; right stick X controls steering. Right steering commands right yaw, including in reverse. Proportional steering requires throttle. Pivot steering permits turning in place.</p>)HTML";
     html += "<label>Low-speed limit (%)";
     html += "<input type=\"number\" name=\"lowSpeed\" min=\"5\" max=\"100\" step=\"1\" required value=\"";
@@ -2705,7 +2660,9 @@ String makeWebPage() {
     html += "<input type=\"number\" name=\"brightness\" min=\"1\" max=\"255\" step=\"1\" required value=\"";
     html += String(settings.pixelBrightness);
     html += "\"></label>";
-    html += R"HTML(</section><section class="card"><h2>Battery Configuration</h2><p>Battery: 2S LiPo (8.4 V full). GPIO34: 100 kOhm from battery + to ADC, 33 kOhm from ADC to ground; optional 100 nF to ground. Monitoring is disabled until enabled below.</p>)HTML";
+    html += R"HTML(</section><section class="card"><h2>Battery Configuration</h2>)HTML";
+    html += makeBatteryWiringSvg();
+    html += R"HTML(<p>Divider ratio is about 4.03:1, so 8.4 V gives about 2.08 V at the ADC. <b>Never connect the battery directly to GPIO 34.</b> Battery negative must share ground with the ESP32.</p><p class="note">Monitoring is disabled until enabled below. With Limit motor power or Disable drive, a confirmed critical battery stays in effect until the ESP32 is power-cycled, even if the voltage recovers.</p>)HTML";
     html += "<label><input type=\"checkbox\" name=\"batteryEnabled\"";
     if (settings.batteryEnabled) html += " checked";
     html += ">Enable voltage monitoring</label>";
@@ -2754,7 +2711,9 @@ String makeWebPage() {
     html += "<label><input type=\"checkbox\" name=\"batteryRumble\"";
     if (settings.batteryRumble) html += " checked";
     html += ">Battery warning rumble</label>";
-    html += R"HTML(</section><section class="card"><h2>Wi-Fi Configuration</h2><p>Hold OPTIONS + Triangle with drive disarmed and sticks neutral at any time. Motors stay disabled throughout configuration. Release buttons and center sticks before manually rearming. Wi-Fi: ESPRC / ESPRC123. Close this page to start the inactivity timeout.</p>)HTML";
+    html += R"HTML(</section><section class="card"><h2>Wi-Fi Configuration</h2>)HTML";
+    html += makeControllerSvg(CTRL_COMBO);
+    html += R"HTML(<p>Hold OPTIONS + Triangle with drive disarmed and sticks neutral. The status light flashes purple during the hold, then stays purple while configuration is active. Hold again to leave. Motors stay disabled throughout; after leaving, center the sticks and press OPTIONS to re-arm. Wi-Fi: ESPRC / ESPRC123.</p><p class="note">The inactivity timeout counts from your last page load or button press here; the live status updates do not keep Wi-Fi on.</p>)HTML";
     html += "<label>Wi-Fi inactivity timeout (sec)";
     html += "<input type=\"number\" name=\"wifiTimeout\" min=\"30\" max=\"3600\" step=\"1\" required value=\"";
     html += String(settings.wifiTimeoutSeconds);
@@ -2769,9 +2728,10 @@ String makeWebPage() {
 <form method="post" action="/pair-reset" onsubmit="return confirm('Forget saved controller pairing?')"><button>Clear controller pairing</button></form>
 <p>Bluepad32 retains pairing keys across restarts. Press PS to reconnect. After clearing pairing, turn off the old controller and hold Create + PS on the replacement. Motors remain disarmed.</p>
 <form method="post" action="/wifi-off"><button>Shut Down Wi-Fi</button></form></section>)HTML";
+    html += makeControllerCardHtml();
     html += makeStatusLegendHtml();
     html += makeGpioMapHtml();
-    html += R"HTML(<script>async function updateStatus(){try{const r=await fetch('/status',{cache:'no-store'});if(!r.ok)throw Error();const d=await r.json();document.getElementById('status').textContent='Controller: '+d.controller+' ('+d.controllerBattery+')\nDrive: '+d.drive+' / '+d.profile+'\nMotor output: L '+d.left+'%, R '+d.right+'%\nVehicle battery: '+d.vehicleVoltage+' / '+d.batteryState+'\nWi-Fi clients: '+d.clients+'\nUptime: '+d.uptime;}catch(e){document.getElementById('status').textContent='Connection lost. Reconnect to ESPRC Wi-Fi.';}}updateStatus();setInterval(updateStatus,2000);</script>
+    html += R"HTML(<script>async function updateStatus(){try{const r=await fetch('/status',{cache:'no-store'});if(!r.ok)throw Error();const d=await r.json();document.getElementById('status').textContent='Controller: '+d.controller+' ('+d.controllerBattery+')\nDrive: '+d.drive+' / '+d.profile+'\nMotor output: L '+d.left+'%, R '+d.right+'%\nVehicle battery: '+d.vehicleVoltage+' / '+d.batteryState+'\nProtection: '+d.protection+'\nWi-Fi clients: '+d.clients+'\nUptime: '+d.uptime+'\nLast reset: '+d.resetReason;}catch(e){document.getElementById('status').textContent='Connection lost. Reconnect to ESPRC Wi-Fi.';}}updateStatus();setInterval(updateStatus,2000);</script>
 </main></body></html>)HTML";
     return html;
 }
@@ -2783,7 +2743,7 @@ String makeWebPage() {
 
 void handleStatus() {
 
-    noteWebActivity();
+    // Polling is not user activity (R10).
 
 
     String json =
@@ -2923,7 +2883,8 @@ void handleStatus() {
     ) {
 
         json +=
-            "Disabled / Unknown";
+            !settings.batteryEnabled ? "Disabled" :
+            batteryNoReading ? "No reading on GPIO 34" : "Qualifying...";
 
     } else {
 
@@ -2952,6 +2913,31 @@ void handleStatus() {
     json +=
         "\",";
 
+
+    // Protection summary (R6, R7, S1)
+    json += "\"protection\":\"";
+    if (emergencyAbort) {
+        json += "Emergency abort - power-cycle to clear";
+    } else if (batteryDriveLockout()) {
+        json += "Drive locked out: ";
+        json += batteryLockoutReason();
+    } else if (batteryPowerLimited()) {
+        json += "Power limited to ";
+        json += String(settings.criticalPowerLimitPercent);
+        json += "% (critical battery";
+        json += batteryLatchedBehavior ? ", until power cycle)" : ")";
+    } else if (controllerStaleStop) {
+        json += "Motors stopped: controller data stale";
+    } else if (driveNeedsNeutral && motorsArmed) {
+        json += "Drive held: return controls to neutral";
+    } else {
+        json += "None";
+    }
+    json += "\",";
+
+    json += "\"resetReason\":\"";
+    json += resetReasonText;
+    json += "\",";
 
     json +=
         "\"clients\":" +
@@ -3130,7 +3116,9 @@ void handleSave() {
     candidate.batteryControllerLight = server.hasArg("batteryLight");
     candidate.batteryRumble = server.hasArg("batteryRumble");
     if (!validSettings(candidate)) {
-        server.send(400, "text/plain", "Critical voltage must be below warning voltage; settings were not saved.");
+        String message = settingsProblem(candidate);
+        message += "; settings were not saved.";
+        server.send(400, "text/plain", message);
         return;
     }
     settings = candidate;
@@ -3194,45 +3182,14 @@ void handleDefaults() {
 
 void handleWifiOff() {
 
-    noteWebActivity();
-
-
     server.send(
         200,
         "text/html",
-        R"HTML(
-<html>
-
-<body
-style="
-font-family:Arial;
-background:#111;
-color:white;
-padding:30px;
-">
-
-<h2>ESPRC</h2>
-
-<p>
-Configuration Wi-Fi is shutting down.
-</p>
-
-<p>
-The vehicle remains SAFE.
-</p>
-
-</body>
-
-</html>
-)HTML"
+        R"HTML(<html><body style="font-family:Arial;background:#111;color:white;padding:30px"><h2>ESPRC</h2><p>Configuration Wi-Fi is shutting down.</p><p>The vehicle remains SAFE.</p></body></html>)HTML"
     );
 
-
-    wifiShutdownRequested =
-        true;
-
-    wifiShutdownRequestTime =
-        millis();
+    // Give the response time to reach the browser before the server stops.
+    requestWiFiShutdown("web page", 500);
 }
 
 
@@ -3245,9 +3202,11 @@ void resetControllerPairing() {
     stopMotorsImmediate();
     armButtonReleased = false;
     previousOptions = true;
-    if (controller) controller->disconnect();
     BP32.forgetBluetoothKeys();
-    BP32.enableNewBluetoothConnections(true);
+    // With a controller active, onDisconnectedController() re-enables
+    // new connections once it has gone (R2).
+    if (controller) controller->disconnect();
+    else BP32.enableNewBluetoothConnections(true);
     Serial.println("Bluetooth keys cleared. Turn off old controller; hold Create + PS on replacement.");
 }
 
@@ -3340,10 +3299,10 @@ void configureWebRoutes() {
     );
 
 
+    // Phones probe URLs such as /generate_204 while connected; those are
+    // not user activity and must not keep Wi-Fi on (R10).
     server.onNotFound(
         []() {
-
-            noteWebActivity();
 
             server.send(
                 404,
@@ -3364,91 +3323,45 @@ void startConfigWiFi() {
         Serial.println("Wi-Fi activation blocked: vehicle must be disarmed and not aborted.");
         return;
     }
+
+    if ( wifiConfigActive ) {
+        return;
+    }
+
+    if ( wifiShutdownState != WIFI_SHUTDOWN_NONE ) {
+        Serial.println("Wi-Fi activation blocked: shutdown still in progress.");
+        return;
+    }
+
     Serial.println("Starting ESPRC configuration AP...");
 
-    if (
-        wifiConfigActive
-    ) {
-        return;
-    }
-
-
-    motorsArmed =
-        false;
-
+    motorsArmed = false;
     stopMotorsImmediate();
 
+    WiFi.mode( WIFI_AP );
 
-    WiFi.mode(
-        WIFI_AP
-    );
-
-
-    bool success =
-        WiFi.softAP(
-            AP_SSID,
-            AP_PASSWORD
-        );
-
+    bool success = WiFi.softAP( AP_SSID, AP_PASSWORD );
 
     if (!success) {
-
-        WiFi.mode(
-            WIFI_OFF
-        );
-
-        Serial.println(
-            "Wi-Fi AP start failed."
-        );
-
+        WiFi.mode( WIFI_OFF );
+        Serial.println( "Wi-Fi AP start failed." );
         return;
     }
 
-
     configureWebRoutes();
-
     server.begin();
 
-
-    wifiConfigActive =
-        true;
-
-    wifiShutdownRequested =
-        false;
-
-    wifiLastActivity =
-        millis();
-
+    wifiConfigActive = true;
+    wifiLastActivity = millis();
 
     Serial.println();
-    Serial.println(
-        "Configuration Wi-Fi ON"
-    );
+    Serial.println( "Configuration Wi-Fi ON" );
+    Serial.print( "SSID: " );
+    Serial.println( AP_SSID );
+    Serial.print( "Address: " );
+    Serial.println( WiFi.softAPIP() );
 
-    Serial.print(
-        "SSID: "
-    );
-
-    Serial.println(
-        AP_SSID
-    );
-
-    Serial.print(
-        "Address: "
-    );
-
-    Serial.println(
-        WiFi.softAPIP()
-    );
-
-
-    queueRumble(
-        2,
-        120,
-        100,
-        60,
-        60
-    );
+    queueRumble( 2, 120, 100, 60, 60 );
 }
 
 
@@ -3456,75 +3369,97 @@ void startConfigWiFi() {
 // STOP CONFIG WI-FI
 // ======================================================================
 
-void stopConfigWiFi() {
-    armButtonReleased = false;
-    previousOptions = true;
+// Every exit path (controller combo, web button, idle timeout) calls this.
+// It only records the request; serviceWiFiShutdown() does the work from
+// loop(), one step at a time (H3). Motors stay locked out throughout
+// because wifiConfigActive remains true until the last step.
+void requestWiFiShutdown( const char* reason, unsigned long delayMs ) {
 
-    if (
-        !wifiConfigActive
-    ) {
+    if ( !wifiConfigActive || wifiShutdownState != WIFI_SHUTDOWN_NONE ) {
         return;
     }
 
-
-    server.stop();
-
-
-    WiFi.softAPdisconnect(
-        true
-    );
-
-    WiFi.mode(
-        WIFI_OFF
-    );
-
-
-    wifiConfigActive =
-        false;
-
-    wifiShutdownRequested =
-        false;
-
-
-    motorsArmed =
-        false;
-
+    armButtonReleased = false;
+    previousOptions = true;
+    motorsArmed = false;
     stopMotorsImmediate();
 
+    wifiShutdownState = WIFI_SHUTDOWN_PENDING;
+    wifiShutdownStageStart = millis();
+    wifiShutdownStageDelay = delayMs;
+
+    Serial.printf(
+        "Wi-Fi shutdown requested (%s). Free heap: %u\n",
+        reason,
+        ESP.getFreeHeap()
+    );
+}
+
+
+void serviceWiFiShutdown() {
+
+    if ( wifiShutdownState == WIFI_SHUTDOWN_NONE ) {
+        return;
+    }
+
+    if ( millis() - wifiShutdownStageStart < wifiShutdownStageDelay ) {
+        return;
+    }
+
+    switch ( wifiShutdownState ) {
+
+        case WIFI_SHUTDOWN_PENDING:
+            Serial.println( "Wi-Fi shutdown: stopping server" );
+            server.stop();
+            wifiShutdownState = WIFI_SHUTDOWN_DISCONNECT_AP;
+            break;
+
+        case WIFI_SHUTDOWN_DISCONNECT_AP:
+            Serial.println( "Wi-Fi shutdown: disconnecting AP" );
+            // Radio stays on here; the next stage turns it off.
+            WiFi.softAPdisconnect( false );
+            wifiShutdownState = WIFI_SHUTDOWN_DISABLE_RADIO;
+            break;
+
+        case WIFI_SHUTDOWN_DISABLE_RADIO:
+            Serial.println( "Wi-Fi shutdown: disabling radio" );
+            WiFi.mode( WIFI_OFF );
+            finishWiFiShutdown();
+            return;
+
+        default:
+            wifiShutdownState = WIFI_SHUTDOWN_NONE;
+            return;
+    }
+
+    wifiShutdownStageStart = millis();
+    wifiShutdownStageDelay = WIFI_SHUTDOWN_STAGE_MS;
+}
+
+
+void finishWiFiShutdown() {
+
+    wifiShutdownState = WIFI_SHUTDOWN_NONE;
+    wifiConfigActive = false;
+
+    armButtonReleased = false;
+    previousOptions = true;
+    motorsArmed = false;
+    stopMotorsImmediate();
+
+    Serial.println( "Wi-Fi configuration OFF" );
 
     // Require a fresh settle / neutral check before the vehicle can be
     // armed again after configuration mode.
-    if (
-        controller &&
-        controller->isConnected()
-    ) {
-
-        controllerState =
-            CONTROLLER_INITIALIZING;
-
-        controllerConnectedAt =
-            millis();
-
-        controllerNeutralSince =
-            0;
-
-        controllerWaitingForNeutralLogged =
-            false;
+    if ( controller && controller->isConnected() ) {
+        controllerState = CONTROLLER_INITIALIZING;
+        controllerConnectedAt = millis();
+        controllerNeutralSince = 0;
+        controllerWaitingForNeutralLogged = false;
+        Serial.println( "Controller revalidation required" );
     }
 
-
-    Serial.println(
-        "Configuration Wi-Fi OFF - controller must revalidate neutral before READY."
-    );
-
-
-    queueRumble(
-        1,
-        160,
-        0,
-        50,
-        50
-    );
+    queueRumble( 1, 160, 0, 50, 50 );
 }
 
 
@@ -3534,12 +3469,14 @@ void stopConfigWiFi() {
 
 void serviceConfigWiFi() {
 
-    if (
-        !wifiConfigActive
-    ) {
+    if ( wifiShutdownState != WIFI_SHUTDOWN_NONE ) {
+        serviceWiFiShutdown();
         return;
     }
 
+    if ( !wifiConfigActive ) {
+        return;
+    }
 
     static int lastClients = -1;
     int clients = WiFi.softAPgetStationNum();
@@ -3547,42 +3484,15 @@ void serviceConfigWiFi() {
         Serial.printf("Wi-Fi clients: %d (previous %d)\n", clients, lastClients);
         lastClients = clients;
     }
+
     server.handleClient();
 
+    // Only user actions count as activity; /status polling does not (R10).
+    unsigned long timeout = settings.wifiTimeoutSeconds * 1000UL;
 
-    if (
-        wifiShutdownRequested
-    ) {
-
-        if (
-            millis() -
-            wifiShutdownRequestTime >
-            500
-        ) {
-
-            stopConfigWiFi();
-        }
-
-        return;
-    }
-
-
-    unsigned long timeout =
-        settings.wifiTimeoutSeconds *
-        1000UL;
-
-
-    if (
-        millis() -
-        wifiLastActivity >
-        timeout
-    ) {
-
-        Serial.println(
-            "Wi-Fi idle timeout."
-        );
-
-        stopConfigWiFi();
+    if ( millis() - wifiLastActivity > timeout ) {
+        Serial.println( "Wi-Fi idle timeout." );
+        requestWiFiShutdown( "idle timeout", 0 );
     }
 }
 
@@ -3740,8 +3650,12 @@ void serviceControllerState() {
     previousL1 =
         controller->l1();
 
-    previousR1 =
-        controller->r1();
+    previousR1 = controller->r1();
+
+    previousPS = controller->miscSystem();
+    driveNeedsNeutral = false;
+    optionsPressValid = false;
+    triangleDuringOptions = false;
 
     armButtonReleased =
         !controller->miscStart() &&
@@ -3913,12 +3827,7 @@ void processWiFiCombo() {
         1000UL;
 
 
-    if (
-        !wifiComboTriggered &&
-        millis() -
-        wifiComboStart >=
-        required
-    ) {
+    if ( !wifiComboTriggered && millis() - wifiComboStart >= required ) {
 
         wifiComboTriggered =
             true;
@@ -3928,7 +3837,7 @@ void processWiFiCombo() {
             wifiConfigActive
         ) {
 
-            stopConfigWiFi();
+            requestWiFiShutdown( "controller OPTIONS + Triangle", 0 );
 
         } else {
 
@@ -3946,20 +3855,28 @@ void onConnectedController(
     ControllerPtr ctl
 ) {
 
-    if (
-        controller != nullptr
-    ) {
+    // R2: only one controller may drive. An extra one is disconnected so
+    // it cannot occupy a slot and strand the vehicle if the first drops.
+    if ( controller != nullptr ) {
+
+        Serial.println( "Second controller rejected - disconnecting it." );
+        ctl->disconnect();
         return;
     }
 
 
     if (!ctl->isGamepad()) {
+        ctl->disconnect();
         return;
     }
 
 
-    controller =
-        ctl;
+    controller = ctl;
+
+    // Stop scanning for new pairings while this controller is active (R2).
+    // A previously paired pad can still connect; the check above
+    // disconnects it. Re-enabled in onDisconnectedController().
+    BP32.enableNewBluetoothConnections(false);
 
 
     // A Bluetooth connection is NOT permission to drive.  Enter an
@@ -3984,14 +3901,17 @@ void onConnectedController(
         millis();
 
 
-    armButtonReleased =
-        false;
+    armButtonReleased = false;
 
-    previousOptions =
-        true;
+    previousOptions = true;
 
-    previousL1 =
-        false;
+    previousPS = true;
+    controllerStaleStop = false;
+    driveNeedsNeutral = false;
+    optionsPressValid = false;
+    triangleDuringOptions = false;
+
+    previousL1 = false;
 
     previousR1 =
         false;
@@ -4080,13 +4000,16 @@ void onDisconnectedController(
         false;
 
 
-    rumblePattern.active =
-        false;
+    wifiComboStart = 0;
+    controllerStaleStop = false;
+    driveNeedsNeutral = false;
+    optionsPressValid = false;
+    triangleDuringOptions = false;
+
+    rumblePattern.active = false;
 
 
-    Serial.println(
-        "Controller disconnected - motors stopped; vehicle DISARMED."
-    );
+    Serial.println( "Controller disconnected - motors stopped; vehicle DISARMED." );
 }
 
 
@@ -4098,24 +4021,26 @@ void onDisconnectedController(
 // Every refusal is logged and rumbles so the driver knows (R3).
 void tryArmFromButton() {
 
-    if (emergencyAbort || wifiConfigActive || motorsArmed) {
+    if (motorsArmed) {
+        return;
+    }
+
+    if (emergencyAbort || wifiConfigActive) {
+
+        Serial.println(
+            emergencyAbort
+                ? "Arming blocked: emergency abort (power-cycle to clear)."
+                : "Arming blocked: Wi-Fi configuration active or shutting down."
+        );
+
+        queueRumble(3, 80, 80, 30, 30);
         return;
     }
 
 
-    bool batteryLockout =
-        settings.batteryEnabled &&
-        (batteryState == BATTERY_CRITICAL || batteryState == BATTERY_UNKNOWN) &&
-        settings.criticalBehavior == 2;
+    if (batteryDriveLockout()) {
 
-
-    if (batteryLockout) {
-
-        Serial.println(
-            batteryState == BATTERY_UNKNOWN
-                ? "Arming blocked: battery reading not qualified yet (Disable Drive)."
-                : "Arming blocked: critical battery (Disable Drive)."
-        );
+        Serial.printf("Arming blocked: %s.\n", batteryLockoutReason());
 
         // Three pulses: battery lockout.
         queueRumble(
@@ -4177,6 +4102,30 @@ void processButtons() {
         triangleDuringOptions = false;
         return;
     }
+
+
+    // --------------------------------------------------------------
+    // PS = controller e-stop (R9). Stop only: it never arms.
+    // --------------------------------------------------------------
+
+    bool ps =
+        controller->miscSystem();
+
+    if (ps && !previousPS) {
+
+        // A PS press also cancels any OPTIONS press in progress.
+        optionsPressValid = false;
+
+        if (motorsArmed) {
+            motorsArmed = false;
+            stopMotorsImmediate();
+            Serial.println("E-stop (PS): motors stopped; vehicle DISARMED.");
+            // One long strong pulse, distinct from the refusal patterns.
+            queueRumble(1, 450, 0, 220, 220);
+        }
+    }
+
+    previousPS = ps;
 
 
     // Wi-Fi combo gets priority because it uses OPTIONS.
@@ -4363,6 +4312,67 @@ void printVerboseControllerDebug() {
 
 
 // ======================================================================
+// STALE CONTROLLER DATA STOP (S1)
+// ======================================================================
+//
+// The 2 s CONTROLLER_TIMEOUT_MS disarms. This faster check only stops
+// the motors, so a short Bluetooth stall does not leave the vehicle
+// driving on its last command.
+
+void serviceStaleStop() {
+
+    if ( !controller || !controller->isConnected() ||
+         controllerState != CONTROLLER_READY || controllerTimeoutActive ) {
+        return;
+    }
+
+    bool stale = millis() - lastControllerReport > CONTROLLER_STALE_STOP_MS;
+
+    if ( controllerStaleStop ) {
+        if ( !stale ) {
+            controllerStaleStop = false;
+            Serial.println( "Controller reports resumed - drive held at zero until controls are neutral." );
+        }
+        return;
+    }
+
+    if ( stale ) {
+
+        controllerStaleStop = true;
+        driveNeedsNeutral = true;
+        stopMotorsImmediate();
+
+        Serial.println(
+            motorsArmed
+                ? "Controller data stale (> 300 ms) - motors stopped; still ARMED."
+                : "Controller data stale (> 300 ms)."
+        );
+    }
+}
+
+
+// ======================================================================
+// RESET REASON (S2)
+// ======================================================================
+
+const char* describeResetReason( esp_reset_reason_t reason ) {
+    switch ( reason ) {
+        case ESP_RST_POWERON:   return "power-on";
+        case ESP_RST_EXT:       return "external reset pin";
+        case ESP_RST_SW:        return "software restart";
+        case ESP_RST_PANIC:     return "crash (panic)";
+        case ESP_RST_INT_WDT:   return "interrupt watchdog";
+        case ESP_RST_TASK_WDT:  return "task watchdog";
+        case ESP_RST_WDT:       return "other watchdog";
+        case ESP_RST_DEEPSLEEP: return "wake from deep sleep";
+        case ESP_RST_BROWNOUT:  return "brownout (supply voltage dropped)";
+        case ESP_RST_SDIO:      return "SDIO reset";
+        default:                return "unknown";
+    }
+}
+
+
+// ======================================================================
 // SETUP
 // ======================================================================
 
@@ -4395,9 +4405,10 @@ void setup() {
         "Firmware "
     );
 
-    Serial.println(
-        FIRMWARE_VERSION
-    );
+    Serial.println( FIRMWARE_VERSION );
+
+    resetReasonText = describeResetReason( esp_reset_reason() );
+    Serial.printf( "Reset reason: %s\n", resetReasonText );
 
     Serial.println(
         "================================="
@@ -4457,8 +4468,11 @@ void setup() {
     );
 
 
-    BP32.enableNewBluetoothConnections(true);
+    // H4: disable virtual devices (touchpad-as-mouse) before accepting
+    // connections. "DS5: Failed to create virtual device" is harmless;
+    // the gamepad itself still connects.
     BP32.enableVirtualDevice(false);
+    BP32.enableNewBluetoothConnections(true);
     Serial.printf("Bluepad32: %s\n", BP32.firmwareVersion());
     const uint8_t* bt = BP32.localBdAddress();
     Serial.printf("Bluetooth address: %02X:%02X:%02X:%02X:%02X:%02X\n",
@@ -4485,7 +4499,11 @@ void setup() {
     );
 
     Serial.println(
-        "OPTIONS = Arm / Disarm"
+        "OPTIONS = Arm (on release) / Disarm (on press)"
+    );
+
+    Serial.println(
+        "PS = E-stop (stop and disarm)"
     );
 
     Serial.println(
@@ -4591,17 +4609,24 @@ void loop() {
 
             stopMotorsImmediate();
 
-            controllerState =
-                CONTROLLER_INITIALIZING;
+            controllerState = CONTROLLER_INITIALIZING;
 
-            controllerNeutralSince =
-                0;
+            controllerNeutralSince = 0;
 
-            armButtonReleased =
-                false;
+            armButtonReleased = false;
 
-            previousOptions =
-                true;
+            previousOptions = true;
+
+            // R4: clear the Wi-Fi combo so the status does not keep
+            // flashing the hold color.
+            wifiComboActive = false;
+            wifiComboTriggered = false;
+            wifiComboStart = 0;
+
+            controllerStaleStop = false;
+            driveNeedsNeutral = false;
+            optionsPressValid = false;
+            triangleDuringOptions = false;
 
             Serial.println(
                 wasArmed
@@ -4613,6 +4638,8 @@ void loop() {
 
 
     serviceControllerState();
+
+    serviceStaleStop();
 
 
     // --------------------------------------------------------------
@@ -4637,7 +4664,12 @@ void loop() {
 
         processButtons();
 
-        processDrive();
+        if ( controllerStaleStop ) {
+            requestedLeftMotor = 0;
+            requestedRightMotor = 0;
+        } else {
+            processDrive();
+        }
 
     } else {
 

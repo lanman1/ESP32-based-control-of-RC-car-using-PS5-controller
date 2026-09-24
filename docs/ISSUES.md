@@ -4,42 +4,57 @@ Each entry becomes one GitHub issue once the GitHub CLI is available. Keep the I
 
 Sources: the v0.5 code review (re-checked against 0.6.0) and follow-up web UI / Bluetooth notes. The original handoff documents were removed on 2026-09-23 and remain in git history.
 
-Status: `open`, `in progress (branch)`, `done (version)`.
+Status: `open`, `in progress (branch)`, `code done in <version>, untested`, `done (version)`.
+
+## Test before merging `release/0.7.0`
+
+With the tracks raised, after flashing 0.7.0 (settings reset to defaults on first boot):
+
+1. **R1 / R3:** OPTIONS then Triangle, and Triangle then OPTIONS, must never arm. Normal arm on release and disarm on press work. Arming with a stick pushed gives 2 pulses.
+2. **R9:** PS while armed stops and disarms at once (one long rumble). PS while disarmed does nothing.
+3. **S1 / V1:** armed with the controller held still for 10 s: no stale stop or timeout on Serial. Then walk out of range or cover the controller: motors stop within about 0.3 s.
+4. **R2:** connect a second paired controller: Serial shows it rejected and the first keeps driving.
+5. **H3:** enter and leave Wi-Fi config with the combo, with the web button, and by idle timeout (set 30 s). Each shows the shutdown stages and no crash. Last reset reason stays "power-on".
+6. **R5 / U2:** the Wi-Fi hold flashes purple and active is solid purple on both the pixel and the lightbar.
+7. **R6 / R7:** with monitoring on, Disable drive, and no divider (or a bench supply below critical): arming gives 3 pulses and a slow red flash. Raising the voltage, saving settings or restoring defaults does not clear a latched critical; only a power cycle does.
+8. **R8:** full throttle, then press L1: speed ramps down rather than cutting.
+9. **M2:** motor whine gone at 20 kHz, and both motors still reach full speed.
+10. **Web UI:** all new cards render on a phone; the idle timeout fires with the page left open (R10).
 
 ## Priority
 
 | ID | Title | Status |
 |----|-------|--------|
-| R1 | OPTIONS pressed before Triangle arms instead of entering config | code done, untested |
-| R2 | Second controller can occupy the slot and strand the vehicle | open |
-| R6 | Disable Drive lets a LiPo cycle toward over-discharge | open |
-| H3 | Staged / deferred Wi-Fi shutdown (sys_evt stack-canary crash) | open |
-| S1 | Stop motors quickly when controller data stops (before the 2 s disarm) | open |
-| S2 | Log and show the ESP32 reset reason | open |
+| R1 | OPTIONS pressed before Triangle arms instead of entering config | code done in 0.7.0, untested |
+| R2 | Second controller can occupy the slot and strand the vehicle | code done in 0.7.0, untested |
+| R6 | Disable Drive lets a LiPo cycle toward over-discharge | code done in 0.7.0, untested |
+| H3 | Staged / deferred Wi-Fi shutdown (sys_evt stack-canary crash) | code done in 0.7.0, untested |
+| S1 | Stop motors quickly when controller data stops (before the 2 s disarm) | code done in 0.7.0, untested |
+| S2 | Log and show the ESP32 reset reason | code done in 0.7.0, untested |
 
 ## Bugs and design
 
 | ID | Title | Status |
 |----|-------|--------|
-| R3 | Denied arming gives no feedback | code done, untested |
-| R4 | Data-timeout path leaves stale Wi-Fi combo state | open |
-| R5 | Battery colors hide Wi-Fi hold / active indication | open |
-| R7 | Corrupt-settings recovery can lock out a vehicle with no divider | open |
-| R8 | Speed-limit reductions bypass the deceleration ramp | open |
-| R9 | No controller e-stop | open |
-| R10 | Wi-Fi idle timeout never fires while the page is open | open |
+| R3 | Denied arming gives no feedback | code done in 0.7.0, untested |
+| R4 | Data-timeout path leaves stale Wi-Fi combo state | code done in 0.7.0, untested |
+| R5 | Battery colors hide Wi-Fi hold / active indication | code done in 0.7.0, untested |
+| R7 | Corrupt-settings recovery can lock out a vehicle with no divider | code done in 0.7.0, untested |
+| R8 | Speed-limit reductions bypass the deceleration ramp | code done in 0.7.0, untested |
+| R9 | No controller e-stop | code done in 0.7.0, untested |
+| R10 | Wi-Fi idle timeout never fires while the page is open | code done in 0.7.0, untested |
 
 ## Web UI and Bluetooth
 
 | ID | Title | Status |
 |----|-------|--------|
-| H1 | Battery divider wiring SVG in web UI | open |
-| H2 | DualSense Create + PS pairing SVG in web UI | open |
-| H4 | Bluepad32 init order; virtual device failure non-fatal | open |
-| H5 | Pairing documentation cleanup (Create + PS, not Options) | open |
-| U1 | DualSense OPTIONS + Triangle Wi-Fi combo diagram in web UI | open |
-| U2 | Status indicator color legend in web UI | code done, untested |
-| U3 | GPIO map in web UI | code done, untested |
+| H1 | Battery divider wiring SVG in web UI | code done in 0.7.0, untested |
+| H2 | DualSense Create + PS pairing SVG in web UI | code done in 0.7.0, untested |
+| H4 | Bluepad32 init order; virtual device failure non-fatal | code done in 0.7.0, untested |
+| H5 | Pairing documentation cleanup (Create + PS, not Options) | done (0.7.0 audit; all text says Create + PS) |
+| U1 | DualSense OPTIONS + Triangle Wi-Fi combo diagram in web UI | code done in 0.7.0, untested |
+| U2 | Status indicator color legend in web UI | code done in 0.7.0, untested |
+| U3 | GPIO map in web UI | code done in 0.7.0, untested |
 
 ## Documentation
 
@@ -47,7 +62,7 @@ Status: `open`, `in progress (branch)`, `done (version)`.
 |----|-------|--------|
 | D1 | README claims the settings namespace is migrated | done (namespace renamed to `esprc`) |
 | D2 | README references missing `tests/` | done (tests section removed) |
-| D3 | Critical recovery wording ambiguous | open (after R6) |
+| D3 | Critical recovery wording ambiguous | done (0.7.0 README: power cycle clears) |
 | T1 | Commit `tests/test_firmware.py` if it exists locally | done (file does not exist) |
 
 ## Minor
@@ -55,10 +70,10 @@ Status: `open`, `in progress (branch)`, `done (version)`.
 | ID | Title | Status |
 |----|-------|--------|
 | M1 | Public default Wi-Fi password `ESPRC123` | deferred (owner keeps it for now) |
-| M2 | 10 kHz PWM is audible; MDD3A supports 20 kHz | open |
-| M3 | Blocking `delay(20)` in `checkAbortButton` | open |
-| M4 | Rumble scheduler `now < nextPulse` breaks at millis() wrap | open |
-| M5 | Save-validation error always blames voltage ordering | open |
+| M2 | 10 kHz PWM is audible; MDD3A supports 20 kHz | code done in 0.7.0, untested |
+| M3 | Blocking `delay(20)` in `checkAbortButton` | code done in 0.7.0, untested |
+| M4 | Rumble scheduler `now < nextPulse` breaks at millis() wrap | code done in 0.7.0, untested |
+| M5 | Save-validation error always blames voltage ordering | code done in 0.7.0, untested |
 | M6 | Confirm GPIO 0 auto-program circuit cannot trigger a spurious abort | open (hardware) |
 
 ## Hardware verification
