@@ -414,6 +414,14 @@ Leaving configuration mode (controller combination, web button or idle timeout) 
 
 ---
 
+## Current Wi-Fi / Bluetooth workaround (0.7.0)
+
+SoftAP association has been reported to be more reliable if the DualSense is disconnected or powered off before entering Wi-Fi configuration mode. This is a manual workaround observation; 0.7.0 does not automatically suspend Bluetooth before starting SoftAP.
+
+The existing 0.7.0 entry method still requires a connected controller for **OPTIONS + Triangle**. When using that method, enter configuration mode first, then power off the DualSense before attempting to join **ESPRC** from the phone or computer. Powering off the controller does not itself enter configuration mode. With the controller off, use the web **Shut Down Wi-Fi** button or the existing idle timeout to exit. Reconnect the controller afterward, allow the normal initialization / neutral validation to complete, and explicitly arm with OPTIONS; reconnection never auto-arms.
+
+Automatic Bluetooth suspension and restoration is planned under [F8 in the issue tracker](docs/ISSUES.md#f8---wi-fi--bluetooth-coexistence-during-configuration).
+
 # Wi-Fi Idle Timeout
 
 Default:
@@ -797,6 +805,7 @@ Potential future firmware additions include:
 * configuration export/import
 * JSON backup of settings
 * firmware update support
+* improved Wi-Fi / Bluetooth coexistence: automatically suspend Bluetooth / disconnect the controller before starting SoftAP, then restore Bluetooth after the existing staged Wi-Fi shutdown; require controller reconnect and neutral validation, and never auto-arm ([F8](docs/ISSUES.md#f8---wi-fi--bluetooth-coexistence-during-configuration))
 * physical configuration button
 * dedicated emergency-stop GPIO
 * custom ESPRC PCB
