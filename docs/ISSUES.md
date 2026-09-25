@@ -94,6 +94,7 @@ With the tracks raised, after flashing 0.7.0 (settings reset to defaults on firs
 | F5 | Lighting engine for pixels 1+ | future |
 | F6 | Servo configuration for GPIO 32 | future |
 | F7 | Dedicated emergency-stop input | future |
+| F8 | Wi-Fi / Bluetooth coexistence during configuration | future |
 
 ---
 
@@ -173,6 +174,12 @@ Resolved 2026-09-23: the owner confirmed `tests/test_firmware.py` does not exist
 - F5: headlights, taillights, brake and reverse lights on pixels 1+, linked to throttle and direction. See README "Planned Lighting Features".
 - F6: servo on GPIO 32 with endpoints, centering and reversing in the web UI.
 - F7: a wired e-stop input separate from the BOOT/PRG button on GPIO 0.
+
+### F8 - Wi-Fi / Bluetooth coexistence during configuration
+
+Future change after 0.7.0: automatically suspend Bluetooth / disconnect the DualSense before starting SoftAP, and prevent Bluetooth reconnection while configuration mode is active. Keep the vehicle disarmed and both motors stopped throughout. Restore Bluetooth only after the existing staged Wi-Fi shutdown has completed (web server stopped, AP disconnected, Wi-Fi radio off, with the existing pauses). Require controller reconnect and the normal INITIALIZING / neutral validation, clear stale button-edge state, and require a fresh explicit OPTIONS arming action. Never auto-arm. Preserve saved pairing keys.
+
+Check SoftAP association with the controller initially connected, all shutdown paths, controller reconnect / neutral validation, and that held buttons or off-center controls cannot arm or move the vehicle. This is planned work, not behavior implemented in 0.7.0.
 
 ### M1-M6
 - M1: consider a per-device password derived from the MAC. Deferred at owner request.
