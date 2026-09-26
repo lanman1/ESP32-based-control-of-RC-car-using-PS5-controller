@@ -4,10 +4,16 @@ All notable changes to the ESP RC firmware are recorded here. The format follows
 
 ## [0.7.0] - 2026-09 (release branch)
 
-Compiled against `esp32-bluepad32:esp32@4.1.0` and Adafruit NeoPixel 1.15.5 (about 93% of the default app partition). **Not yet hardware-tested.** See "Test before merging" in [docs/ISSUES.md](docs/ISSUES.md).
+Compiled against `esp32-bluepad32:esp32@4.1.0` and Adafruit NeoPixel 1.15.5 (about 93% of the default app partition). **Hardware tested and mostly functional**, based on owner-reported testing. Known Wi-Fi / Bluetooth, pairing and controller LED issues remain; this is not confirmation that every regression case has passed. See "0.7.0 hardware-test status and regression checklist" in [docs/ISSUES.md](docs/ISSUES.md).
+
+### Known issues from hardware testing
+- SoftAP association is unreliable while the DualSense remains connected. Reliability improves when Wi-Fi configuration mode is enabled first and the DualSense is then powered off or disconnected before joining the AP. This manual workaround is cumbersome. Future firmware should automate Bluetooth suspension / disconnect during configuration and restoration after Wi-Fi shutdown (F8); 0.7.0 does not implement this.
+- An existing DualSense pairing may not survive ESP32 / controller power cycles reliably; **Create + PS** re-pairing can be needed (H6).
+- Initial pairing is inconsistent and may require more than one attempt (H7).
+- The DualSense LEDs can remain blue despite successful pairing and normal vehicle status-pixel behavior. Controller LED color alone is not a reliable indication of connection / application state in this scenario (H8).
 
 ### Upgrade notes
-- **Settings reset on update:** the NVS settings namespace is now `esprc`. Settings saved by 0.6.0 or earlier are not migrated, so the first boot starts from factory defaults. Bluetooth pairing is unaffected.
+- **Settings reset on update:** the NVS settings namespace is now `esprc`. Settings saved by 0.6.0 or earlier are not migrated, so the first boot starts from factory defaults. Bluetooth pairing keys are stored separately from these settings; the power-cycle pairing problem noted above remains open.
 - **Critical battery now latches:** with Limit motor power or Disable drive, a confirmed critical battery stays in effect until the ESP32 is power-cycled (R6).
 - **Wi-Fi configuration is now purple** instead of yellow (R5).
 

@@ -8,6 +8,8 @@ The current firmware revision is:
 
 **Firmware Version: 0.7.0**
 
+**Hardware tested and mostly functional.** Known Wi-Fi / Bluetooth coexistence, pairing / reconnection and DualSense LED issues remain. See [Project Status](#project-status) and the [issue tracker](docs/ISSUES.md).
+
 See [CHANGELOG.md](CHANGELOG.md) for revision history.
 
 ---
@@ -416,7 +418,7 @@ Leaving configuration mode (controller combination, web button or idle timeout) 
 
 ## Current Wi-Fi / Bluetooth workaround (0.7.0)
 
-SoftAP association has been reported to be more reliable if the DualSense is disconnected or powered off before entering Wi-Fi configuration mode. This is a manual workaround observation; 0.7.0 does not automatically suspend Bluetooth before starting SoftAP.
+Hardware testing of 0.7.0 found that SoftAP association is unreliable while the DualSense remains connected. Reliability improves when Wi-Fi configuration mode is enabled first and the DualSense is then powered off or disconnected before joining the AP. This manual workaround is cumbersome; 0.7.0 does not automatically suspend Bluetooth before starting SoftAP.
 
 The existing 0.7.0 entry method still requires a connected controller for **OPTIONS + Triangle**. When using that method, enter configuration mode first, then power off the DualSense before attempting to join **ESPRC** from the phone or computer. Powering off the controller does not itself enter configuration mode. With the controller off, use the web **Shut Down Wi-Fi** button or the existing idle timeout to exit. Reconnect the controller afterward, allow the normal initialization / neutral validation to complete, and explicitly arm with OPTIONS; reconnection never auto-arms.
 
@@ -712,7 +714,11 @@ For PS5 DualSense support, use the Bluepad32-compatible ESP32 Arduino environmen
 
 Bluepad32 stores Bluetooth link keys in ESP32 NVS. The v0.4 sketch already avoided clearing keys at startup; v0.5 and later preserve that behavior, explicitly enable connections/scanning at boot and after disconnect, and disable virtual mouse devices so the DualSense touchpad cannot occupy the gamepad slot.
 
-For initial pairing, hold **Create + PS** until the DualSense flashes rapidly. On later power cycles, power the ESP32 and press **PS** to wake the previously paired controller. Bluepad32 handles reconnecting with the saved keys; the controller cannot be woken by the ESP32 while powered off. Reconnection always leaves drive disarmed and requires released buttons, neutral sticks, and a new OPTIONS press.
+For initial pairing, hold **Create + PS** until the DualSense flashes rapidly. On later power cycles, power the ESP32 and press **PS** to wake the previously paired controller. Bluepad32 is expected to reconnect using saved keys; the controller cannot be woken by the ESP32 while powered off. Reconnection always leaves drive disarmed and requires released buttons, neutral sticks, and a new OPTIONS press.
+
+**Known 0.7.0 hardware-test issues:** an existing pairing may not survive ESP32 / controller power cycles reliably, so **Create + PS** re-pairing can be needed after reboot. Initial pairing is also inconsistent and may require more than one attempt. These remain open issues; saved keys do not guarantee successful reconnection in every power-cycle scenario.
+
+The DualSense LEDs have also been observed to remain blue even though pairing succeeds and the vehicle status pixel behaves normally. In this scenario, controller LED color alone is not a reliable indication of connection / application state. See H6-H8 in the [issue tracker](docs/ISSUES.md#web-ui-and-bluetooth).
 
 To replace a controller:
 
@@ -884,6 +890,17 @@ Critical Power Limit:      30%
 ---
 
 # Project Status
+
+**Firmware 0.7.0 has been hardware tested and is mostly functional**, based on owner-reported testing. This does not establish that every individual regression case has passed; the [hardware regression checklist](docs/ISSUES.md#070-hardware-test-status-and-regression-checklist) remains available for follow-up validation.
+
+Known issues remain:
+
+* SoftAP association is unreliable with the DualSense connected. Enable Wi-Fi configuration mode, then power off / disconnect the controller before joining the AP. This improves reliability but is cumbersome; automatic Bluetooth suspension / disconnect and restoration is planned (F8).
+* Existing pairing may not survive ESP32 / controller power cycles, requiring **Create + PS** re-pairing (H6).
+* Initial pairing is inconsistent (H7).
+* DualSense LEDs can remain blue despite successful pairing and normal vehicle status-pixel behavior (H8).
+
+See [Bluetooth Pairing and Reconnection](#bluetooth-pairing-and-reconnection) and the [current Wi-Fi workaround](#current-wi-fi--bluetooth-workaround-070) for details.
 
 The following functions have been successfully bench-tested in earlier development revisions:
 

@@ -4,9 +4,13 @@ Each entry becomes one GitHub issue once the GitHub CLI is available. Keep the I
 
 Sources: the v0.5 code review (re-checked against 0.6.0) and follow-up web UI / Bluetooth notes. The original handoff documents were removed on 2026-09-23 and remain in git history.
 
-Status: `open`, `in progress (branch)`, `code done in <version>, untested`, `done (version)`.
+Status: `open`, `in progress (branch)`, `implemented in <version>; individual verification not recorded`, `done (version)`.
 
-## Test before merging `release/0.7.0`
+## 0.7.0 hardware-test status and regression checklist
+
+**0.7.0 is hardware tested and mostly functional**, based on owner-reported testing. Remaining observed issues are SoftAP association with the DualSense connected (F8), pairing persistence across ESP32 / controller power cycles (H6), inconsistent initial pairing (H7), and DualSense LEDs staying blue despite successful pairing and normal vehicle status-pixel behavior (H8).
+
+The overall hardware-test report does not record a pass for every case below. Retain this checklist for follow-up regression testing; implementation rows marked "individual verification not recorded" do not mean the release is hardware-untested or that the specific fix has been confirmed.
 
 With the tracks raised, after flashing 0.7.0 (settings reset to defaults on first boot):
 
@@ -25,36 +29,39 @@ With the tracks raised, after flashing 0.7.0 (settings reset to defaults on firs
 
 | ID | Title | Status |
 |----|-------|--------|
-| R1 | OPTIONS pressed before Triangle arms instead of entering config | code done in 0.7.0, untested |
-| R2 | Second controller can occupy the slot and strand the vehicle | code done in 0.7.0, untested |
-| R6 | Disable Drive lets a LiPo cycle toward over-discharge | code done in 0.7.0, untested |
-| H3 | Staged / deferred Wi-Fi shutdown (sys_evt stack-canary crash) | code done in 0.7.0, untested |
-| S1 | Stop motors quickly when controller data stops (before the 2 s disarm) | code done in 0.7.0, untested |
-| S2 | Log and show the ESP32 reset reason | code done in 0.7.0, untested |
+| R1 | OPTIONS pressed before Triangle arms instead of entering config | implemented in 0.7.0; individual verification not recorded |
+| R2 | Second controller can occupy the slot and strand the vehicle | implemented in 0.7.0; individual verification not recorded |
+| R6 | Disable Drive lets a LiPo cycle toward over-discharge | implemented in 0.7.0; individual verification not recorded |
+| H3 | Staged / deferred Wi-Fi shutdown (sys_evt stack-canary crash) | implemented in 0.7.0; individual verification not recorded |
+| S1 | Stop motors quickly when controller data stops (before the 2 s disarm) | implemented in 0.7.0; individual verification not recorded |
+| S2 | Log and show the ESP32 reset reason | implemented in 0.7.0; individual verification not recorded |
 
 ## Bugs and design
 
 | ID | Title | Status |
 |----|-------|--------|
-| R3 | Denied arming gives no feedback | code done in 0.7.0, untested |
-| R4 | Data-timeout path leaves stale Wi-Fi combo state | code done in 0.7.0, untested |
-| R5 | Battery colors hide Wi-Fi hold / active indication | code done in 0.7.0, untested |
-| R7 | Corrupt-settings recovery can lock out a vehicle with no divider | code done in 0.7.0, untested |
-| R8 | Speed-limit reductions bypass the deceleration ramp | code done in 0.7.0, untested |
-| R9 | No controller e-stop | code done in 0.7.0, untested |
-| R10 | Wi-Fi idle timeout never fires while the page is open | code done in 0.7.0, untested |
+| R3 | Denied arming gives no feedback | implemented in 0.7.0; individual verification not recorded |
+| R4 | Data-timeout path leaves stale Wi-Fi combo state | implemented in 0.7.0; individual verification not recorded |
+| R5 | Battery colors hide Wi-Fi hold / active indication | implemented in 0.7.0; individual verification not recorded |
+| R7 | Corrupt-settings recovery can lock out a vehicle with no divider | implemented in 0.7.0; individual verification not recorded |
+| R8 | Speed-limit reductions bypass the deceleration ramp | implemented in 0.7.0; individual verification not recorded |
+| R9 | No controller e-stop | implemented in 0.7.0; individual verification not recorded |
+| R10 | Wi-Fi idle timeout never fires while the page is open | implemented in 0.7.0; individual verification not recorded |
 
 ## Web UI and Bluetooth
 
 | ID | Title | Status |
 |----|-------|--------|
-| H1 | Battery divider wiring SVG in web UI | code done in 0.7.0, untested |
-| H2 | DualSense Create + PS pairing SVG in web UI | code done in 0.7.0, untested |
-| H4 | Bluepad32 init order; virtual device failure non-fatal | code done in 0.7.0, untested |
+| H1 | Battery divider wiring SVG in web UI | implemented in 0.7.0; individual verification not recorded |
+| H2 | DualSense Create + PS pairing SVG in web UI | implemented in 0.7.0; individual verification not recorded |
+| H4 | Bluepad32 init order; virtual device failure non-fatal | implemented in 0.7.0; individual verification not recorded |
 | H5 | Pairing documentation cleanup (Create + PS, not Options) | done (0.7.0 audit; all text says Create + PS) |
-| U1 | DualSense OPTIONS + Triangle Wi-Fi combo diagram in web UI | code done in 0.7.0, untested |
-| U2 | Status indicator color legend in web UI | code done in 0.7.0, untested |
-| U3 | GPIO map in web UI | code done in 0.7.0, untested |
+| H6 | DualSense pairing persistence across power cycles | open (observed in 0.7.0 hardware testing) |
+| H7 | Inconsistent initial DualSense pairing | open (observed in 0.7.0 hardware testing) |
+| H8 | DualSense LEDs remain blue despite successful pairing | open (observed in 0.7.0 hardware testing) |
+| U1 | DualSense OPTIONS + Triangle Wi-Fi combo diagram in web UI | implemented in 0.7.0; individual verification not recorded |
+| U2 | Status indicator color legend in web UI | implemented in 0.7.0; individual verification not recorded |
+| U3 | GPIO map in web UI | implemented in 0.7.0; individual verification not recorded |
 
 ## Documentation
 
@@ -70,10 +77,10 @@ With the tracks raised, after flashing 0.7.0 (settings reset to defaults on firs
 | ID | Title | Status |
 |----|-------|--------|
 | M1 | Public default Wi-Fi password `ESPRC123` | deferred (owner keeps it for now) |
-| M2 | 10 kHz PWM is audible; MDD3A supports 20 kHz | code done in 0.7.0, untested |
-| M3 | Blocking `delay(20)` in `checkAbortButton` | code done in 0.7.0, untested |
-| M4 | Rumble scheduler `now < nextPulse` breaks at millis() wrap | code done in 0.7.0, untested |
-| M5 | Save-validation error always blames voltage ordering | code done in 0.7.0, untested |
+| M2 | 10 kHz PWM is audible; MDD3A supports 20 kHz | implemented in 0.7.0; individual verification not recorded |
+| M3 | Blocking `delay(20)` in `checkAbortButton` | implemented in 0.7.0; individual verification not recorded |
+| M4 | Rumble scheduler `now < nextPulse` breaks at millis() wrap | implemented in 0.7.0; individual verification not recorded |
+| M5 | Save-validation error always blames voltage ordering | implemented in 0.7.0; individual verification not recorded |
 | M6 | Confirm GPIO 0 auto-program circuit cannot trigger a spurious abort | open (hardware) |
 
 ## Hardware verification
@@ -94,7 +101,7 @@ With the tracks raised, after flashing 0.7.0 (settings reset to defaults on firs
 | F5 | Lighting engine for pixels 1+ | future |
 | F6 | Servo configuration for GPIO 32 | future |
 | F7 | Dedicated emergency-stop input | future |
-| F8 | Wi-Fi / Bluetooth coexistence during configuration | future |
+| F8 | Wi-Fi / Bluetooth coexistence during configuration | open (observed in 0.7.0; automation planned) |
 
 ---
 
@@ -154,6 +161,15 @@ Order: `BP32.setup(...)`, `BP32.enableVirtualDevice(false)`, `BP32.enableNewBlue
 ### H5 - Pairing documentation cleanup
 Audit comments, web help, README, and Serial text for pairing instructions; all must say Create + PS. 0.6.0 text is already correct in the places checked; H2 adds the diagram.
 
+### H6 - DualSense pairing persistence across power cycles
+Hardware testing of 0.7.0 found that an existing pairing may not survive ESP32 / controller power cycles reliably. **Create + PS** re-pairing can be needed after reboot instead of reconnecting with PS. Investigate saved-key persistence and reconnection separately; the observation does not establish that keys are erased. Validate ESP32-only, controller-only and combined power cycles.
+
+### H7 - Inconsistent initial DualSense pairing
+Initial pairing in 0.7.0 is inconsistent and may require multiple attempts. Investigate first-time **Create + PS** pairing and capture Bluetooth / Serial diagnostics on success and failure. Root cause is not yet established.
+
+### H8 - DualSense LEDs remain blue despite successful pairing
+In an observed 0.7.0 scenario, pairing succeeds and the vehicle status pixel behaves normally, but the DualSense LEDs remain blue rather than reflecting application state. Controller LED color alone is unreliable in this scenario. Investigate controller LED output / Bluepad32 behavior and compare the intended lightbar state with the vehicle pixel; no root cause or firmware fix is confirmed.
+
 ### D3 - Critical recovery wording
 After R6, state explicitly in README and web help which voltage clears a critical Disable Drive lockout.
 
@@ -176,6 +192,8 @@ Resolved 2026-09-23: the owner confirmed `tests/test_firmware.py` does not exist
 - F7: a wired e-stop input separate from the BOOT/PRG button on GPIO 0.
 
 ### F8 - Wi-Fi / Bluetooth coexistence during configuration
+
+Hardware testing of 0.7.0 found unreliable SoftAP association while the DualSense remains connected. Enable Wi-Fi configuration mode with **OPTIONS + Triangle**, then power off / disconnect the DualSense before joining the AP to improve reliability. This manual workaround is cumbersome. With the controller off, exit using the web **Shut Down Wi-Fi** button or idle timeout, then reconnect the controller.
 
 Future change after 0.7.0: automatically suspend Bluetooth / disconnect the DualSense before starting SoftAP, and prevent Bluetooth reconnection while configuration mode is active. Keep the vehicle disarmed and both motors stopped throughout. Restore Bluetooth only after the existing staged Wi-Fi shutdown has completed (web server stopped, AP disconnected, Wi-Fi radio off, with the existing pauses). Require controller reconnect and the normal INITIALIZING / neutral validation, clear stale button-edge state, and require a fresh explicit OPTIONS arming action. Never auto-arm. Preserve saved pairing keys.
 
